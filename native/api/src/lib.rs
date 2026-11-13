@@ -28,6 +28,7 @@ use horizon_client::mobs::goals;
 use horizon_client::mod_api::{
     ClientLevelUnloadEvent, ClientTickPostEvent, Compound, Flow, Hooks, Host, InteractEntityEvent, LayerDefinitionsEvent,
     LevelTickPostEvent, LivingDeathEvent, LivingIncomingDamageEvent, MobSubmitEvent, ModelPart, NativeHeightmap,
+    PlayerTeleportedEvent,
     NativeInventoryKind, NativeMobRender, NativeWorldDraw, NetFromServerEvent, RegisterGoalsEvent, Tag, UseItemOnEvent,
     WorldSubmitEvent,
 };
@@ -73,11 +74,33 @@ struct Server {
     casts: HashMap<String, Vec<Cast>>,
     next_id: u32,
     rng: Rng,
+    /// Spawner ticks before the next named character (a boss, or one of the people) may spawn.
+    named_wait: u32,
 }
+
+/// A named character: a boss with phases, or one of the people. One of each at a time, one at a
+/// time, and seldom: about once or twice a night.
+fn named(m: &mobs::Mob) -> bool {
+    m.npc || !m.phases.is_empty()
+}
+
+/// Ticks between named characters: five minutes, half a night.
+const NAMED_EVERY: u32 = 6000;
+/// After that wait, the chance a named character the spawner picks really comes, in 100.
+const NAMED_CHANCE: u32 = 35;
+/// Yukari's chance to come through when a Yukari gap is used: 0.05%, 1 in 2,000.
+const YUKARI_FROM_GAP: u32 = 2_000;
 
 static SERVER: LazyLock<Mutex<Server>> = LazyLock::new(|| {
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-    Mutex::new(Server { config: config::Loaded::new(), shots: HashMap::new(), casts: HashMap::new(), next_id: 1, rng: Rng::new(seed) })
+    Mutex::new(Server {
+        config: config::Loaded::new(),
+        shots: HashMap::new(),
+        casts: HashMap::new(),
+        next_id: 1,
+        rng: Rng::new(seed),
+        named_wait: NAMED_EVERY / 2,
+    })
 });
 
 fn ray_box(a: V3, d: V3, reach: f64, b: [[f64; 3]; 2]) -> Option<f64> {
@@ -341,7 +364,10 @@ impl Server {
         if players.is_empty() || host.level_difficulty(level) == Some("peaceful") {
             return;
         }
-        let ours: Vec<[f64; 3]> = host.level_entities(dimension).into_iter().filter(|(_, k, _)| is_ours(k)).map(|(_, _, p)| p).collect();
+        self.named_wait = self.named_wait.saturating_sub(1);
+        let entities = host.level_entities(dimension);
+        let ours: Vec<[f64; 3]> = entities.iter().filter(|(_, k, _)| is_ours(k)).map(|(_, _, p)| *p).collect();
+        let alive: HashSet<String> = entities.iter().filter(|(_, k, _)| is_ours(k)).map(|(_, k, _)| k.to_string()).collect();
         self.config.refresh(|| host.config_dir().ok());
         let cfg = self.config.config.clone();
         let total: u32 = mobs::MOBS.iter().filter_map(|m| cfg.rule(m)).map(|r| r.weight).sum();
@@ -366,6 +392,13 @@ impl Server {
                 continue;
             };
             let (Some(rule), Some(chosen)) = (mob.spawn, cfg.rule(mob)) else { continue };
+            // A named character: only after the wait, now and then, and never two of the same.
+            let is_named = named(mob);
+            if is_named
+                && (self.named_wait > 0 || self.rng.int(100) >= NAMED_CHANCE || alive.contains(&format!("thmobs:{}", mob.id)))
+            {
+                continue;
+            }
             let a = f64::from(self.rng.float()) * std::f64::consts::TAU;
             let r = 24.0 + f64::from(self.rng.float()) * 24.0;
             let (x, z) = ((p.position[0] + a.cos() * r).floor() as i32, (p.position[2] + a.sin() * r).floor() as i32);
@@ -400,7 +433,10 @@ impl Server {
                     }
                 }
             }
-            let count = chosen.min + self.rng.int(chosen.max - chosen.min + 1);
+            let count = if is_named { 1 } else { chosen.min + self.rng.int(chosen.max - chosen.min + 1) };
+            if is_named {
+                self.named_wait = NAMED_EVERY;
+            }
             for _ in 0..count {
                 let (dx, dz) = (self.rng.int(5) as i32 - 2, self.rng.int(5) as i32 - 2);
                 let at = [f64::from(x + dx) + 0.5, f64::from(y) + 0.1, f64::from(z + dz) + 0.5];
@@ -810,6 +846,31 @@ impl Hooks for Mod {
             });
         }
         Flow::Cancel
+    }
+
+    /// A Yukari gap used: once in 2,000, Yukari comes through after the player.
+    fn player_teleported(&self, host: &mut dyn Host, event: &mut PlayerTeleportedEvent<'_>) {
+        let Some(level) = host.level(event.dimension) else { return };
+        let to = event.to.map(|c| c.floor() as i32);
+        let by_gap = (-2..=2).any(|dx| {
+            (-1..=3).any(|dy| {
+                (-2..=2).any(|dz| {
+                    host.level_block(level, [to[0] + dx, to[1] + dy, to[2] + dz])
+                        .is_some_and(|b| b.starts_with("yukari_gap:yukari_gap"))
+                })
+            })
+        });
+        if !by_gap {
+            return;
+        }
+        let roll = SERVER.lock().map_or(1, |mut s| s.rng.int(YUKARI_FROM_GAP));
+        if roll != 0 {
+            return;
+        }
+        let Some(yukari) = mobs::MOBS.iter().find(|m| m.id == "yukari") else { return };
+        let at = [event.to[0] + 2.0, event.to[1] + 0.5, event.to[2] + 2.0];
+        let dimension = event.dimension.to_owned();
+        summon(host, &dimension, yukari, at);
     }
 
     fn level_tick_post(&self, host: &mut dyn Host, event: &mut LevelTickPostEvent<'_>) {

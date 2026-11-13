@@ -35,7 +35,8 @@ All 30 living mobs of the three mods (Grimoire of Alice adds none):
 
 Each mob's attacks are its original `danmakuPattern` ported line for line, at 35% of the original
 rate of fire. Its model is its Java model, converted part for part. Hostile mobs (but not creepers)
-go for the Touhou mobs that are attacking.
+go for the Touhou mobs that are attacking, and a Touhou mob a vanilla mob hurts fights it back, its
+danmaku aimed at that mob until it is dead or 40 blocks off.
 
 ## Spawning
 
@@ -50,6 +51,11 @@ fairy = on 30 1 6    # on/off, weight, smallest group, largest group
 ```
 
 A saved change takes hold in game within ten seconds.
+
+The named characters (the bosses, and the people) are rare: one comes at most every five minutes,
+about once or twice a night, alone and never while another of the same one is about. And whenever a
+player comes through a Yukari gap ([Yukari Gaps](https://github.com/mxpbxb/yukari-gaps)), once in
+2,000 Yukari comes through after them.
 
 ## Not yet
 

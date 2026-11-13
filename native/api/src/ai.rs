@@ -248,7 +248,20 @@ pub struct Danmaku {
     rng: Rng,
     /// Toward the next tick its attack advances on (`PACE`).
     pace: f32,
+    /// A mob, not one of ours, that hurt it: it fights that back first.
+    revenge: Option<u32>,
 }
+
+/// Whom one of our mobs fights: the player, or a mob that hurt it.
+struct Foe {
+    who: Who,
+    at: V3,
+    eye: f64,
+    middle: f64,
+}
+
+/// How far one of our mobs goes after a mob that hurt it.
+const REVENGE_RANGE: f64 = 40.0;
 
 impl Danmaku {
     pub fn new(spec: &'static mobs::Mob, id: u32) -> Danmaku {
@@ -276,6 +289,7 @@ impl Danmaku {
             mem: [0; 4],
             rng,
             pace: 0.0,
+            revenge: None,
         }
     }
 
@@ -374,6 +388,29 @@ impl Goal for Danmaku {
         if m.ai.last_hurt_by == Some(Who::Player) && player.is_some() {
             self.target = true;
         }
+        // A vanilla mob (anything not ours) that hurts it, it turns on, ahead of the player.
+        if let Some(Who::Mob(id)) = m.ai.last_hurt_by
+            && !ours(id)
+            && self.revenge != Some(id)
+        {
+            self.revenge = Some(id);
+        }
+        let (mx, my, mz) = (m.position.x, m.position.y, m.position.z);
+        let revenge = self.revenge.and_then(|id| cx.w.seen(id)).filter(|s| {
+            s.alive && ((s.position.x - mx).powi(2) + (s.position.y - my).powi(2) + (s.position.z - mz).powi(2)).sqrt() <= REVENGE_RANGE
+        });
+        let revenge = revenge.map(|s| Foe {
+            who: Who::Mob(s.id),
+            at: v3(s.position.x, s.position.y, s.position.z),
+            eye: s.eye_y,
+            middle: (s.bounds.min_position().y + s.bounds.max_position().y) / 2.0,
+        });
+        if revenge.is_none() {
+            if self.revenge.is_some() {
+                m.ai.last_hurt_by = None;
+            }
+            self.revenge = None;
+        }
         if let Some(p) = player
             && !self.target
         {
@@ -386,9 +423,12 @@ impl Goal for Danmaku {
             self.target = false;
         }
         // While it fights it holds the player as its target, so the dolls and hostile mobs know it.
-        m.ai.target = self.target.then_some(Who::Player);
+        m.ai.target = match &revenge {
+            Some(f) => Some(f.who),
+            None => self.target.then_some(Who::Player),
+        };
         if let Ok(mut attacking) = ATTACKING.lock() {
-            if self.target {
+            if self.target || revenge.is_some() {
                 attacking.insert(m.id);
             } else {
                 attacking.remove(&m.id);
@@ -400,18 +440,27 @@ impl Goal for Danmaku {
             while height < 8 && air(cx, x, y - height, z) {
                 height += 1;
             }
-            if let (true, Some(p)) = (self.target, player)
+            let foe_y = revenge.as_ref().map(|f| f.at.y).or_else(|| player.filter(|_| self.target).map(|p| p.position.y));
+            if let Some(foe_y) = foe_y
                 && height > self.ai.flying_height
             {
-                m.velocity.y += (p.position.y - m.position.y) * 6.0e-4;
+                m.velocity.y += (foe_y - m.position.y) * 6.0e-4;
             } else if height < self.ai.flying_height {
                 m.velocity.y += 0.006;
             }
         }
 
-        let Some(p) = player.filter(|_| self.target) else { return };
+        let foe = revenge.or_else(|| {
+            player.filter(|_| self.target).map(|p| Foe {
+                who: Who::Player,
+                at: v3(p.position.x, p.position.y, p.position.z),
+                eye: p.eye[1],
+                middle: (p.bounds.min_position().y + p.bounds.max_position().y) / 2.0,
+            })
+        });
+        let Some(p) = foe else { return };
         let eye = m.eye_y();
-        let (dx, dy, dz) = (p.position.x - m.position.x, p.eye[1] - eye, p.position.z - m.position.z);
+        let (dx, dy, dz) = (p.at.x - m.position.x, p.eye - eye, p.at.z - m.position.z);
         let yaw = (-(dx.atan2(dz)) as f32).to_degrees();
         let pitch = (-(dy.atan2((dx * dx + dz * dz).sqrt())) as f32).to_degrees();
         if !self.stop {
@@ -427,9 +476,10 @@ impl Goal for Danmaku {
         if advance {
             self.pace -= 1.0;
         }
-        if m.sees(cx.w, Who::Player) && !advance {
+        let sees = m.sees(cx.w, p.who);
+        if sees && !advance {
             self.lost_target = 0;
-        } else if m.sees(cx.w, Who::Player) {
+        } else if sees {
             self.lost_target = 0;
             let wet = {
                 let state = cx.w.world.block(x, y, z);
@@ -446,7 +496,7 @@ impl Goal for Danmaku {
                     yaw: m.yaw,
                     pitch: m.head_pitch,
                     ticks: m.age as i32,
-                    target: Some(v3(p.position.x, (p.bounds.min_position().y + p.bounds.max_position().y) / 2.0, p.position.z)),
+                    target: Some(v3(p.at.x, p.middle, p.at.z)),
                     fire: Fire { out: &mut fired, rng: &mut self.rng },
                     span: self.span,
                     pattern: self.pattern,
@@ -500,7 +550,7 @@ impl Goal for Danmaku {
             self.glide(dir, self.ai.speed, 30);
         }
         if self.move_timer <= 0 && self.ai.attack_distance > 0.0 {
-            let d = (dx * dx + (p.position.y - m.position.y).powi(2) + dz * dz).sqrt();
+            let d = (dx * dx + (p.at.y - m.position.y).powi(2) + dz * dz).sqrt();
             let a = self.ai.attack_distance;
             if d < a {
                 self.glide(vec_from_angle(yaw + 180.0, pitch, 1.0), self.ai.speed * 0.3 * (1.0 - d / a), 15);
