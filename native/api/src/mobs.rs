@@ -314,6 +314,13 @@ pub const MOBS: &[Mob] = &[
         health: 10.0, ai: ai(0.25, 16.0, 16.0, 4), attack: attack::tengu_crow, fairy_counter: true, start: &[1, 2], start_ai: &[], phases: &[],
         spawn: spawn(3, 1, 3, MOUNTAINS, Light::Any), burns: false, npc: false, egg: (0x202020, 0xC02020),
     },
+    // The crow tengu as it was before it was made slower and fewer: the original's speed (0.5) and its
+    // full rate of fire. Rare, and always alone.
+    Mob {
+        id: "old_crow_tengu", name: "Old Crow Tengu", look: Look::Model("jtg/ModelTenguCrow", &["tengu_crow"]),
+        health: 10.0, ai: ai(0.5, 16.0, 16.0, 4), attack: attack::tengu_crow, fairy_counter: true, start: &[1, 2], start_ai: &[], phases: &[],
+        spawn: spawn(1, 1, 1, MOUNTAINS, Light::Rare), burns: false, npc: false, egg: (0x000000, 0xFF2020),
+    },
     Mob {
         id: "hell_raven", name: "Hell Raven", look: Look::Model("jtg/ModelHellRaven", &["hell_raven"]),
         health: 15.0, ai: ai(0.3, 16.0, 16.0, 4), attack: attack::hell_raven, fairy_counter: true, start: &[1, 2], start_ai: &[], phases: &[],

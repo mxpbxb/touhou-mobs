@@ -665,6 +665,24 @@ fn set(root: &mut ModelPart, name: &str, f: impl Fn(&mut ModelPart)) {
 fn pose(root: &mut ModelPart, model: &str, mob: &NativeMobRender<'_>) {
     let tick = mob.age;
     let (yaw, pitch) = (mob.head_yaw.to_radians(), mob.pitch.to_radians());
+    // The crow tengu and the hell raven: `ModelTenguCrow` and `ModelHellRaven.setRotationAngles`. The
+    // head turns, the body bobs, and the two-piece wings beat, the outer piece half as far.
+    if let Some(bird) = [("jtg/ModelTenguCrow", "tengu"), ("jtg/ModelHellRaven", "raven")].iter().find(|(m, _)| *m == model).map(|(_, b)| *b) {
+        set(root, &format!("{bird}Head"), |p| {
+            p.y_rot = yaw;
+            p.x_rot = pitch;
+        });
+        set(root, &format!("{bird}Body"), |p| p.x_rot = std::f32::consts::FRAC_PI_3 + (tick * 0.1).cos() * 0.15);
+        let wing = (tick * 0.8).cos() * std::f32::consts::PI * 0.25;
+        set(root, &format!("{bird}WingRight"), |p| p.y_rot = wing);
+        set(root, &format!("{bird}WingLeft"), |p| p.y_rot = -wing);
+        set(root, &format!("{bird}WingRight2"), |p| p.y_rot = wing * 0.5);
+        // So the raven's was named: `ravenWingleft2`.
+        for left2 in ["tenguWingLeft2", "ravenWingleft2"] {
+            set(root, left2, |p| p.y_rot = -wing * 0.5);
+        }
+        return;
+    }
     for head in ["head", "bipedHead", "Head"] {
         set(root, head, |p| {
             p.y_rot = yaw;

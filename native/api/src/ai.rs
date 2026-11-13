@@ -471,7 +471,8 @@ impl Goal for Danmaku {
         }
 
         // The attack goes on only on its share of ticks.
-        self.pace += PACE;
+        // The old crow tengu fires at the original's full rate.
+        self.pace += if self.spec.id == "old_crow_tengu" { 1.0 } else { PACE };
         let advance = self.pace >= 1.0;
         if advance {
             self.pace -= 1.0;

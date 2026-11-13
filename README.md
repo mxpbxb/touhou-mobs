@@ -20,7 +20,7 @@ Install both from the release, then press Build in the launcher:
 
 ## The mobs
 
-All 30 living mobs of the three mods (Grimoire of Alice adds none):
+All 30 living mobs of the three mods (Grimoire of Alice adds none), and one of this port's own:
 
 - **Fairies and small youkai:** fairy, sunflower fairy (with its familiar), phantom, familiar,
   Hanabeeper, ice fairy, Nether fairy, moon fairy, moon sunflower fairy, crow tengu, hell raven, ice
@@ -32,6 +32,11 @@ All 30 living mobs of the three mods (Grimoire of Alice adds none):
   to set the danmaku level, easy to lunatic.
 - **Summons:** the Cursed Decoy Doll (draws every hostile mob within 40 blocks for nine seconds) and
   Yukari's yin-yang orb (circles its player).
+- **The Old Crow Tengu:** the crow tengu as it was before this port made it slower and rarer, at the
+  original's speed and full rate of fire. A rare spawn, always alone, in the mountains.
+
+The crow tengu and the hell raven fly with their original animation: the body bobs, and their
+two-piece wings beat.
 
 Each mob's attacks are its original `danmakuPattern` ported line for line, at 35% of the original
 rate of fire. Its model is its Java model, converted part for part. Hostile mobs (but not creepers)
