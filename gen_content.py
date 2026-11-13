@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 jars, out, manifest = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
-NS, VERSION = "thmobs", "0.4.0"
+NS, VERSION = "thmobs", "0.5.0"
 if out.exists():
     shutil.rmtree(out)
 oa, od = out / "assets" / NS, out / "data" / NS
