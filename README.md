@@ -48,7 +48,7 @@ danmaku aimed at that mob until it is dead or 40 blocks off.
 With [Touhou Items](https://github.com/mxpbxb/touhou-items) installed, the mobs scatter its Point
 items when they die for good, a boss many more than a fairy, and power items: a fairy now and then a
 small one, a boss big ones and sometimes Full Power, an Extend or a Bomb. Alice Dolls Restringed's
-dolls take them as favour.
+dolls take them as love.
 
 ## Spawning
 
