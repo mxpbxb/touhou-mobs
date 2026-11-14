@@ -43,6 +43,13 @@ rate of fire. Its model is its Java model, converted part for part. Hostile mobs
 go for the Touhou mobs that are attacking, and a Touhou mob a vanilla mob hurts fights it back, its
 danmaku aimed at that mob until it is dead or 40 blocks off.
 
+## Drops
+
+With [Touhou Items](https://github.com/mxpbxb/touhou-items) installed, the mobs scatter its Point
+items when they die for good, a boss many more than a fairy, and power items: a fairy now and then a
+small one, a boss big ones and sometimes Full Power, an Extend or a Bomb. Alice Dolls Restringed's
+dolls take them as favour.
+
 ## Spawning
 
 Mobs spawn on their own in their original biomes, Biomes O' Plenty's included, by weight and light
