@@ -521,8 +521,14 @@ pub fn classic_of(m: &Mob) -> Option<&'static Mob> {
     by_kind(&format!("thmobs:classic_{}", m.id))
 }
 
+/// A mob kind as a hook names it, without the `minecraft:` the game's hooks put before every mob
+/// kind, a modded one's too (`minecraft:thmobs:fairy`).
+pub fn bare(kind: &str) -> &str {
+    kind.strip_prefix("minecraft:").filter(|k| k.contains(':')).unwrap_or(kind)
+}
+
 pub fn by_kind(kind: &str) -> Option<&'static Mob> {
-    let id = kind.strip_prefix("thmobs:")?;
+    let id = bare(kind).strip_prefix("thmobs:")?;
     MOBS.iter().find(|m| m.id == id)
 }
 
@@ -673,6 +679,14 @@ mod tests {
                 assert!(p.hp <= m.max_health());
             }
         }
+    }
+
+    #[test]
+    fn a_hook_s_minecraft_prefixed_kind_is_still_ours() {
+        assert_eq!(by_kind("minecraft:thmobs:fairy").map(|m| m.id), Some("fairy"));
+        assert_eq!(by_kind("thmobs:fairy").map(|m| m.id), Some("fairy"));
+        assert_eq!(bare("minecraft:zombie"), "minecraft:zombie");
+        assert!(by_kind("minecraft:zombie").is_none());
     }
 
     #[test]

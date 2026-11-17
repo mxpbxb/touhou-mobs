@@ -1514,18 +1514,19 @@ impl Hooks for Mod {
     /// card before then (`classic_cards`); this is for one felled from a card that wasn't its last
     /// in one blow, which leaves it at the start of its next.
     fn living_death(&self, host: &mut dyn Host, event: &mut LivingDeathEvent<'_>) -> Flow {
-        let Some(spec) = mobs::by_kind(event.kind) else { return Flow::Continue };
+        let kind = mobs::bare(event.kind);
+        let Some(spec) = mobs::by_kind(kind) else { return Flow::Continue };
         let phase = ai::phase_of(event.entity, spec);
         // `/kill` and the void end it for good, drops and all, whatever phase it is in.
         let killed = matches!(event.damage_type, "minecraft:generic_kill" | "minecraft:out_of_world");
         let next = spec.phases.iter().find(|p| p.from == phase).filter(|p| p.hp > 0.0 && !killed);
-        let classic = is_classic(event.kind);
+        let classic = is_classic(kind);
         if classic {
             explode(host, event.entity, next.is_none());
         }
         let Some(next) = next else {
             // Gone for good: it scatters Point items, a boss many more than a fairy.
-            drop_points(host, event.entity, !spec.phases.is_empty(), event.kind);
+            drop_points(host, event.entity, !spec.phases.is_empty(), kind);
             if let Ok(mut s) = ai::STATUS.lock() {
                 s.remove(&event.entity);
             }
@@ -1543,19 +1544,20 @@ impl Hooks for Mod {
 
     /// A boss can't be hurt in a new phase's first moments.
     fn living_incoming_damage(&self, event: &mut LivingIncomingDamageEvent<'_>) -> Flow {
-        if is_ours(event.kind) && ai::invincible(event.entity as u32) { Flow::Cancel } else { Flow::Continue }
+        if is_ours(mobs::bare(event.kind)) && ai::invincible(event.entity as u32) { Flow::Cancel } else { Flow::Continue }
     }
 
     /// A right click: Rinnosuke trades; Miko sets the danmaku level, from easy to lunatic and round
     /// again; the others do nothing.
     fn interact_entity(&self, host: &mut dyn Host, event: &mut InteractEntityEvent<'_>) -> Flow {
-        if !is_ours(event.kind) {
+        let kind = mobs::bare(event.kind);
+        if !is_ours(kind) {
             return Flow::Continue;
         }
-        if event.kind == "thmobs:rinnosuke" {
+        if kind == "thmobs:rinnosuke" {
             return Flow::Continue;
         }
-        if event.kind == "thmobs:miko"
+        if kind == "thmobs:miko"
             && let Some(player) = host.acting_player()
         {
             static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);

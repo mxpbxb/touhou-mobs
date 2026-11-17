@@ -3,7 +3,7 @@
 # personal use. Their art is the content mod `thmobs`.
 [mod]
 id = "thmobs_native"
-version = "0.9.1"
+version = "0.9.2"
 
 [compatibility]
 horizon_revision = "1fe4e6fe0252c44efd41d882daee0468389f7d5f"
