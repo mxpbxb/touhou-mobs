@@ -100,9 +100,40 @@ pub struct Mob {
 }
 
 impl Mob {
-    /// The most health it has in any phase: its type's maximum.
+    /// The most health it has in any phase: its type's maximum. A classic boss has all its spell
+    /// cards' health in one bar, as the Wither: its health times its cards.
     pub fn max_health(&self) -> f32 {
+        if self.classic() {
+            return self.health * self.cards() as f32;
+        }
         self.phases.iter().map(|p| p.hp).fold(self.health, f32::max)
+    }
+
+    /// Whether it is one of the classic bosses.
+    pub fn classic(&self) -> bool {
+        self.id.starts_with("classic_") || self.id == "yukari_great_doll"
+    }
+
+    /// Its spell cards: the phase it starts in and each one it goes on to.
+    pub fn cards(&self) -> usize {
+        self.phases.len() + 1
+    }
+
+    /// Which of its cards (from 0) the phase is.
+    pub fn card_of(&self, phase: i32) -> usize {
+        self.phases.iter().position(|p| p.to == phase).map_or(0, |i| i + 1)
+    }
+
+    /// The card a classic boss with this much health is on: one more for each card's worth of
+    /// health it has lost, the last card down to nothing.
+    pub fn card_at(&self, health: f32) -> usize {
+        let lost = ((self.max_health() - health) / self.health).max(0.0);
+        (lost.floor() as usize).min(self.cards() - 1)
+    }
+
+    /// The health a classic boss starts its card `card` with: all its later cards' and that one's.
+    pub fn top_of(&self, card: usize) -> f32 {
+        self.max_health() - self.health * card as f32
     }
 }
 
@@ -367,7 +398,128 @@ pub const MOBS: &[Mob] = &[
         health: 2.0, ai: ai(0.6, 12.0, 8.0, 3), attack: attack::fairy, fairy_counter: true, start: &[1], start_ai: &[], phases: &[],
         spawn: None, burns: false, npc: false, egg: (0x80E0FF, 0xFFFFFF),
     },
+    // ---- The classic bosses: the named characters as the original mods had them, at their full
+    // rate of fire, with every spell card they declared, lasers and all. No spawn rules of their own
+    // (`spawn: None`): from their eggs, or 1 in 20,000 in place of their counterpart above
+    // (`classic_of`). Their cards share one bar, `health` each: each card's worth lost, on to the next. ----
+    Mob {
+        id: "classic_reimu", name: "Reimu Hakurei (Classic)", look: Look::Model("kaguya/ModelReimu", &["reimu"]),
+        health: 74.0, ai: ai(0.4, 14.0, 0.0, 4), attack: attack::classic_reimu, fairy_counter: false, start: &[101], start_ai: &[],
+        phases: &[ph(101, 102, 90, 74.0, 160, None)],
+        spawn: None, burns: false, npc: false, egg: (0xFFFFFF, 0xE02020),
+    },
+    Mob {
+        id: "classic_reimu_hostile", name: "Reimu Hakurei (Journey To Gensokyo, Classic)", look: Look::Model("kaguya/ModelReimu", &["reimu"]),
+        health: 74.0, ai: ai(0.4, 50.0, 0.0, 0), attack: attack::classic_reimu_hostile, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[ph(1, 101, 40, 60.0, 160, Some(ai(0.4, 50.0, 0.0, 2))), ph(101, 102, 90, 74.0, 160, None)],
+        spawn: None, burns: false, npc: false, egg: (0xFFE0E0, 0xE02020),
+    },
+    Mob {
+        id: "classic_marisa", name: "Marisa Kirisame (Classic)", look: Look::Model("jtg/ModelMarisa", &["marisa"]),
+        health: 60.0, ai: ai(0.4, 20.0, 0.0, 0), attack: attack::classic_marisa, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[
+            ph(1, 101, 40, 60.0, 160, None),
+            ph(101, 2, 90, 60.0, 160, None),
+            ph(2, 102, 40, 60.0, 160, None),
+            ph(102, 3, 90, 60.0, 160, None),
+            ph(3, 103, 40, 60.0, 160, None),
+            ph(103, 104, 90, 60.0, 160, None),
+        ],
+        spawn: None, burns: false, npc: false, egg: (0xFFE040, 0x202020),
+    },
+    Mob {
+        id: "classic_yukari", name: "Yukari Yakumo (Classic)", look: Look::Model("jtg/ModelYukari", &["yukari"]),
+        health: 100.0, ai: ai(0.45, 20.0, 20.0, 2), attack: attack::yukari, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[
+            ph(1, 101, 10, 100.0, 160, None),
+            ph(101, 2, 10, 100.0, 160, None),
+            ph(2, 102, 10, 100.0, 160, None),
+            ph(102, 3, 10, 100.0, 160, None),
+            ph(3, 103, 10, 300.0, 160, None),
+            ph(103, 4, 10, 100.0, 160, None),
+            ph(4, 104, 10, 100.0, 160, None),
+            ph(104, 5, 10, 100.0, 160, None),
+            ph(5, 105, 10, 300.0, 160, None),
+        ],
+        spawn: None, burns: false, npc: false, egg: (0xFFE0A0, 0x8040C0),
+    },
+    // Classic Yukari with a quarter of her health and half her danmaku's damage (`GREAT_DOLL`): she
+    // comes through a gap made global with a Yukari umbrella in place of Yukari, and always drops
+    // an umbrella (Yukari Gaps).
+    Mob {
+        id: "yukari_great_doll", name: "Yukari Great Doll", look: Look::Model("jtg/ModelYukari", &["yukari"]),
+        health: 25.0, ai: ai(0.45, 20.0, 20.0, 2), attack: attack::yukari, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[
+            ph(1, 101, 10, 25.0, 160, None),
+            ph(101, 2, 10, 25.0, 160, None),
+            ph(2, 102, 10, 25.0, 160, None),
+            ph(102, 3, 10, 25.0, 160, None),
+            ph(3, 103, 10, 75.0, 160, None),
+            ph(103, 4, 10, 25.0, 160, None),
+            ph(4, 104, 10, 25.0, 160, None),
+            ph(104, 5, 10, 25.0, 160, None),
+            ph(5, 105, 10, 75.0, 160, None),
+        ],
+        spawn: None, burns: false, npc: false, egg: (0xFFE0A0, 0xE060C0),
+    },
+    Mob {
+        id: "classic_cirno", name: "Cirno (Classic)", look: Look::Model("kaguya/ModelCirno", &["cirno"]),
+        health: 38.0, ai: ai(0.5, 14.0, 30.0, 2), attack: attack::classic_cirno, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[ph(1, 101, 40, 46.0, 60, None), ph(101, 2, 60, 32.0, 20, None), ph(2, 102, 40, 58.0, 60, None)],
+        spawn: None, burns: false, npc: false, egg: (0xFFFFFF, 0x60B8FF),
+    },
+    Mob {
+        id: "classic_rumia", name: "Rumia (Classic)", look: Look::Model("kaguya/ModelRumia", &["rumia"]),
+        health: 36.0, ai: ai(0.25, 14.0, 12.0, 2), attack: attack::classic_rumia, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[ph(1, 101, 40, 44.0, 60, Some(ai(0.25, 14.0, 30.0, 2))), ph(101, 102, 60, 44.0, 60, None)],
+        spawn: None, burns: false, npc: false, egg: (0xFFE080, 0x202020),
+    },
+    Mob {
+        id: "classic_toziko", name: "Soga no Tojiko (Classic)", look: Look::Model("kaguya/ModelToziko", &["toziko"]),
+        health: 40.0, ai: ai(0.25, 14.0, 12.0, 2), attack: attack::classic_toziko, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[ph(1, 101, 40, 44.0, 60, Some(ai(0.25, 14.0, 30.0, 2))), ph(101, 102, 60, 44.0, 60, None)],
+        spawn: None, burns: false, npc: false, egg: (0xFFFFFF, 0x70C070),
+    },
+    Mob {
+        id: "classic_wriggle", name: "Wriggle Nightbug (Classic)", look: Look::Model("kaguya/ModelWriggle", &["wriggle"]),
+        health: 30.0, ai: ai(0.25, 14.0, 12.0, 3), attack: attack::wriggle, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[
+            ph(1, 101, 20, 36.0, 40, Some(ai(0.25, 16.0, 30.0, 2))),
+            ph(101, 102, 60, 42.0, 80, Some(ai(0.25, 15.0, 30.0, 4))),
+        ],
+        spawn: None, burns: false, npc: false, egg: (0x202060, 0x40A040),
+    },
+    // The people Touhou Items Mod gave spell cards but never set fighting: here they fight, in the
+    // phases their entities had for it (`moveDanmakuAttack`), from their spell-card phase.
+    Mob {
+        id: "classic_sakuya", name: "Sakuya Izayoi (Classic)", look: Look::Model("kaguya/ModelSakuya", &["sakuya"]),
+        health: 44.0, ai: ai(0.5, 14.0, 0.0, 2), attack: attack::classic_sakuya, fairy_counter: false, start: &[101], start_ai: &[],
+        phases: &[ph(101, 102, 90, 44.0, 160, None)],
+        spawn: None, burns: false, npc: false, egg: (0xE0E0E0, 0x404080),
+    },
+    Mob {
+        id: "classic_sanae", name: "Sanae Kochiya (Classic)", look: Look::Model("kaguya/ModelSanae", &["sanae"]),
+        health: 56.0, ai: ai(0.5, 14.0, 0.0, 0), attack: attack::classic_sanae, fairy_counter: false, start: &[1], start_ai: &[],
+        phases: &[
+            ph(1, 101, 40, 60.0, 160, Some(ai(0.5, 14.0, 0.0, 2))),
+            ph(101, 102, 90, 60.0, 160, None),
+            ph(102, 103, 90, 60.0, 160, None),
+            ph(103, 104, 90, 60.0, 160, None),
+        ],
+        spawn: None, burns: false, npc: false, egg: (0x4060E0, 0x40A060),
+    },
+    Mob {
+        id: "classic_miko", name: "Toyosatomimi no Miko (Classic)", look: Look::Model("kaguya/ModelMiko", &["miko"]),
+        health: 74.0, ai: ai(0.4, 14.0, 0.0, 2), attack: attack::classic_miko, fairy_counter: false, start: &[101], start_ai: &[],
+        phases: &[ph(101, 102, 90, 74.0, 160, None), ph(102, 103, 90, 74.0, 160, None)],
+        spawn: None, burns: false, npc: false, egg: (0xE0C040, 0x8040C0),
+    },
 ];
+
+/// The classic boss of `m`, if it has one: `classic_<id>`.
+pub fn classic_of(m: &Mob) -> Option<&'static Mob> {
+    by_kind(&format!("thmobs:classic_{}", m.id))
+}
 
 pub fn by_kind(kind: &str) -> Option<&'static Mob> {
     let id = kind.strip_prefix("thmobs:")?;
@@ -492,6 +644,23 @@ mod tests {
     }
 
     #[test]
+    fn the_classic_bosses_never_spawn_and_fight() {
+        let classic: Vec<_> = MOBS.iter().filter(|m| m.id.starts_with("classic_")).collect();
+        assert_eq!(classic.len(), 11);
+        for m in classic {
+            assert!(m.spawn.is_none() && !m.npc, "{}", m.id);
+            assert!(!m.phases.is_empty(), "{}", m.id);
+            assert!(m.name.ends_with("Classic)"), "{}", m.id);
+            // Every phase fights: none ends in the original's spent phase 127, so past the last
+            // phase the boss dies.
+            assert!(m.phases.iter().all(|p| p.to != 127), "{}", m.id);
+            // Each stands in for its counterpart now and then.
+            let base = by_kind(&format!("thmobs:{}", &m.id["classic_".len()..])).unwrap_or_else(|| panic!("{}", m.id));
+            assert_eq!(classic_of(base).map(|c| c.id), Some(m.id));
+        }
+    }
+
+    #[test]
     fn mobs_name_real_models_and_have_starts() {
         for m in MOBS {
             if let Look::Model(model, textures) = m.look {
@@ -502,6 +671,35 @@ mod tests {
             assert_eq!(by_kind(&format!("thmobs:{}", m.id)).map(|x| x.id), Some(m.id));
             for p in m.phases {
                 assert!(p.hp <= m.max_health());
+            }
+        }
+    }
+
+    #[test]
+    fn a_classic_boss_goes_through_its_cards_as_its_health_falls() {
+        let reimu = by_kind("thmobs:classic_reimu_hostile").unwrap();
+        assert_eq!(reimu.cards(), 3);
+        assert_eq!(reimu.max_health(), 74.0 * 3.0);
+        assert_eq!(reimu.card_at(222.0), 0);
+        assert_eq!(reimu.card_at(148.5), 0);
+        assert_eq!(reimu.card_at(148.0), 1);
+        assert_eq!(reimu.card_at(74.0), 2);
+        assert_eq!(reimu.card_at(1.0), 2);
+        assert_eq!(reimu.card_of(1), 0);
+        assert_eq!(reimu.card_of(101), 1);
+        assert_eq!(reimu.card_of(102), 2);
+        assert_eq!(reimu.top_of(1), 148.0);
+        let doll = by_kind("thmobs:yukari_great_doll").unwrap();
+        let yukari = by_kind("thmobs:classic_yukari").unwrap();
+        assert!(doll.classic());
+        assert_eq!(doll.max_health(), yukari.max_health() * 0.25);
+        for m in MOBS.iter().filter(|m| m.classic()) {
+            assert_eq!(m.start.len(), 1, "{}", m.id);
+            // The phases run in order from the one it starts in.
+            let mut at = m.start[0];
+            for p in m.phases {
+                assert_eq!(p.from, at, "{}", m.id);
+                at = p.to;
             }
         }
     }

@@ -13,6 +13,7 @@
 mod ai;
 mod attack;
 mod cards;
+mod classic;
 mod config;
 mod model;
 mod models_gen;
@@ -30,14 +31,15 @@ use horizon_client::mod_api::{
     LevelTickPostEvent, LivingDeathEvent, LivingIncomingDamageEvent, MobSubmitEvent, ModelPart, NativeHeightmap,
     PlayerTeleportedEvent,
     NativeInventoryKind, NativeMobRender, NativeWorldDraw, NetFromServerEvent, RegisterGoalsEvent, Tag, UseItemOnEvent,
-    WorldSubmitEvent,
+    WorldSubmitEvent, NativeBossBar, NativeEffect, ParticleOptions, ParticleType, Text,
 };
 
 use cards::{Actor, Card, Ctx, card_position};
+use classic::Fx;
 use mobs::Look;
 use pattern::Fire;
 use shot::{Batch, Shot, form, shot_full, special};
-use vec::{Rng, V3, angle, angle_to, v3};
+use vec::{Rng, V3, angle, angle_to, cross, rotate, v3};
 
 pub fn hooks() -> Box<dyn Hooks> {
     Box::new(Mod)
@@ -64,14 +66,30 @@ struct Cast {
     pace: f32,
     card_pos: V3,
     card_yaw: f32,
+    card_pitch: f32,
     state: [f32; 2],
     target: V3,
+    /// Cast by a classic boss: at the original's full rate.
+    full: bool,
+}
+
+/// Killing Doll's stopped time about a mob, and the ticks it has left.
+struct Stop {
+    mob: u32,
+    left: i32,
 }
 
 struct Server {
     config: config::Loaded,
     shots: HashMap<String, Vec<Live>>,
     casts: HashMap<String, Vec<Cast>>,
+    stops: HashMap<String, Vec<Stop>>,
+    /// The classic bosses about, this tick.
+    classic: HashSet<u32>,
+    /// The Great Dolls about, this tick: their danmaku does half its damage.
+    halved: HashSet<u32>,
+    /// The boss bars shown: by player and boss, the dimension, the fill (in thousandths) and the name.
+    bars: HashMap<(u128, u32), (String, i32, String)>,
     next_id: u32,
     rng: Rng,
     /// Spawner ticks before the next named character (a boss, or one of the people) may spawn.
@@ -90,6 +108,12 @@ const NAMED_EVERY: u32 = 6000;
 const NAMED_CHANCE: u32 = 35;
 /// Yukari's chance to come through when a Yukari gap is used: 0.05%, 1 in 2,000.
 const YUKARI_FROM_GAP: u32 = 2_000;
+/// A mob with a classic version is that instead, when it spawns, 1 in this many times (0.005%).
+const CLASSIC_IN: u32 = 20_000;
+
+/// Bosses gone on to their next phase, and the health to start it with, still to be given them:
+/// the game sets a mob whose death was canceled to 1 health after `living_death`.
+static REFILL: Mutex<Vec<(u32, f32)>> = Mutex::new(Vec::new());
 
 static SERVER: LazyLock<Mutex<Server>> = LazyLock::new(|| {
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
@@ -97,6 +121,10 @@ static SERVER: LazyLock<Mutex<Server>> = LazyLock::new(|| {
         config: config::Loaded::new(),
         shots: HashMap::new(),
         casts: HashMap::new(),
+        stops: HashMap::new(),
+        classic: HashSet::new(),
+        halved: HashSet::new(),
+        bars: HashMap::new(),
         next_id: 1,
         rng: Rng::new(seed),
         named_wait: NAMED_EVERY / 2,
@@ -150,6 +178,34 @@ fn daytime(time: i64) -> bool {
     !(12_542..=23_459).contains(&t)
 }
 
+/// Whether the mob kind is one of the classic bosses.
+fn is_classic(kind: &str) -> bool {
+    kind.starts_with("thmobs:classic_") || kind == GREAT_DOLL
+}
+
+/// Yukari Great Doll: classic Yukari with a quarter of her health and half her danmaku's damage,
+/// who comes through a gap made global with a Yukari umbrella in place of Yukari.
+const GREAT_DOLL: &str = "thmobs:yukari_great_doll";
+
+/// How tall the mob stands.
+fn height_of(host: &dyn Host, id: u32) -> f64 {
+    host.entity(id).and_then(|e| host.entity_bounding_box(e)).map_or(1.8, |b| b[1][1] - b[0][1])
+}
+
+/// Whether nothing solid stands on the way from `a` to `b`.
+fn clear(host: &dyn Host, level: horizon_client::mod_api::LevelRef, a: V3, b: V3) -> bool {
+    let d = b - a;
+    let n = (d.length() * 2.0).ceil().max(1.0) as i32;
+    (1..=n).all(|i| {
+        let p = a + d * (f64::from(i) / f64::from(n));
+        host.level_block(level, [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32]).is_none_or(|b| passable(&b))
+    })
+}
+
+fn dot(a: V3, b: V3) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
 /// A mob as a caster: where it stands and looks.
 fn actor_of(host: &dyn Host, id: u32) -> Option<Actor> {
     let e = host.entity(id)?;
@@ -166,7 +222,8 @@ impl Server {
         s
     }
 
-    fn add(&mut self, dimension: &str, s: Shot, owner: u32, batch: &mut Batch) {
+    fn add(&mut self, dimension: &str, mut s: Shot, owner: u32, batch: &mut Batch) {
+        s.fancy = s.fancy || self.classic.contains(&owner);
         let s = self.give_id(s);
         batch.fired.push(s.clone());
         self.shots.entry(dimension.to_owned()).or_default().push(Live { shot: s, owner });
@@ -177,6 +234,17 @@ impl Server {
         let level = host.level(dimension);
         let entities = host.level_entities(dimension);
         let here: HashSet<u32> = entities.iter().map(|(id, _, _)| *id).collect();
+        self.classic = entities.iter().filter(|(_, k, _)| is_classic(k)).map(|(id, _, _)| *id).collect();
+        self.halved = entities.iter().filter(|(_, k, _)| k == GREAT_DOLL).map(|(id, _, _)| *id).collect();
+        let halved = self.halved.clone();
+        let scale = |owner: u32| if halved.contains(&owner) { 0.5 } else { 1.0 };
+        // Players by their entity id, for what a shot does to a player itself.
+        let player_ids: HashMap<u32, u128> = host
+            .server_players()
+            .into_iter()
+            .filter(|p| p.dimension == dimension && p.entity_id > 0)
+            .map(|p| (p.entity_id as u32, p.uuid))
+            .collect();
         let player = host
             .server_players()
             .into_iter()
@@ -200,18 +268,31 @@ impl Server {
             if !here.contains(&mob) {
                 continue;
             }
-            let (Some(card), Some(user)) = (Card::by_number(number), actor_of(host, mob)) else { continue };
+            let full = self.classic.contains(&mob);
+            let card = if full { Card::classic_by_number(number) } else { Card::by_number(number) };
+            let (Some(card), Some(user)) = (card, actor_of(host, mob)) else { continue };
             let casts = self.casts.entry(dimension.to_owned()).or_default();
             casts.retain(|c| c.mob != mob);
             let target = player.first().copied().unwrap_or(user.pos + user.look() * 16.0);
-            casts.push(Cast { card, mob, time: 0, pace: 0.0, card_pos: card_position(&user), card_yaw: user.yaw, state: [0.0; 2], target });
+            casts.push(Cast {
+                card,
+                mob,
+                time: 0,
+                pace: 0.0,
+                card_pos: card_position(&user),
+                card_yaw: user.yaw,
+                card_pitch: user.pitch,
+                state: [0.0; 2],
+                target,
+                full,
+            });
         }
 
         // The spell cards being cast.
         let mut casts = self.casts.remove(dimension).unwrap_or_default();
         casts.retain_mut(|cast| {
             let Some(user) = actor_of(host, cast.mob) else { return false };
-            cast.pace += ai::PACE;
+            cast.pace += if cast.full { 1.0 } else { ai::PACE };
             if cast.pace < 1.0 {
                 return true;
             }
@@ -228,11 +309,39 @@ impl Server {
                 target_alive: near.is_some(),
                 card: cast.card_pos,
                 card_yaw: cast.card_yaw,
+                card_pitch: cast.card_pitch,
+                user_height: height_of(host, cast.mob),
             };
             let mut out = Vec::new();
-            cast.card.tick(&ctx, &mut cast.state, &mut Fire { out: &mut out, rng: &mut self.rng });
+            let mut fx = Vec::new();
+            cast.card.tick(&ctx, &mut cast.state, &mut Fire { out: &mut out, rng: &mut self.rng }, &mut fx);
             if cast.card == Card::PerfectFreeze && cast.time == 64 {
                 self.freeze(dimension, ctx.pos_user(), &mut out, &mut batch.gone);
+            }
+            for f in fx {
+                match f {
+                    Fx::Sound(sound, volume, pitch) => {
+                        if let Some(l) = level {
+                            host.level_play_sound(l, sound, ctx.pos_user().array(), 5, volume, pitch);
+                        }
+                    }
+                    Fx::TimeStop(ticks) => {
+                        let stops = self.stops.entry(dimension.to_owned()).or_default();
+                        stops.retain(|s| s.mob != cast.mob);
+                        stops.push(Stop { mob: cast.mob, left: ticks });
+                    }
+                    Fx::Redirect => {
+                        let target = near.filter(|_| ctx.target_alive);
+                        self.redirect(dimension, cast.mob, cast.card_pos, target, user.eye_height, &mut out, &mut batch.gone);
+                    }
+                    Fx::Gap { tries, yaw } => {
+                        let Some(l) = level else { continue };
+                        if let Some(at) = tries.into_iter().find(|p| clear(host, l, user.pos, *p)) {
+                            let s = shot_full(form::GAP, 0, 2.0, 0.0, 0, 10, special::GAP);
+                            out.push(Shot::new(at, angle(yaw, 0.0), 0.0, pattern::rotate_default(), 0.0, 9999, 0.0, 0.0, 0.0, V3::ZERO, s));
+                        }
+                    }
+                }
             }
             for s in out {
                 self.add(dimension, s, cast.mob, &mut batch);
@@ -244,8 +353,21 @@ impl Server {
             self.casts.insert(dimension.to_owned(), casts);
         }
 
+        // Stopped time: what is left of it, and where.
+        let mut stops = self.stops.remove(dimension).unwrap_or_default();
+        stops.retain_mut(|s| {
+            s.left -= 1;
+            s.left > 0 && here.contains(&s.mob)
+        });
+        let stopped: Vec<(V3, i32)> = stops.iter().filter_map(|s| actor_of(host, s.mob).map(|a| (a.pos, s.left))).collect();
+        if !stops.is_empty() {
+            self.stops.insert(dimension.to_owned(), stops);
+        }
+
         if self.shots.get(dimension).is_some_and(|v| !v.is_empty()) {
             let difficulty = level.and_then(|l| host.level_difficulty(l)).unwrap_or("normal");
+            let mut owners: HashMap<u32, Option<Actor>> = HashMap::new();
+            let nearest = |at: V3| player.iter().copied().min_by(|a, b| (*a - at).length().total_cmp(&(*b - at).length()));
             let bodies: Vec<(u32, bool, [[f64; 3]; 2])> = entities
                 .iter()
                 .filter_map(|(id, kind, _)| {
@@ -259,8 +381,79 @@ impl Server {
             let mut fresh = Vec::new();
             let drained: Vec<Live> = shots.drain(..).collect();
             for mut live in drained {
+                // In stopped time a shot that has flown two ticks hangs until the time runs again.
+                if live.shot.hold == 0 && live.shot.ticks >= 2 && live.shot.anchor.is_none() {
+                    let at = live.shot.pos;
+                    if let Some((_, left)) = stopped.iter().find(|(c, _)| {
+                        let d = at - *c;
+                        d.x.abs() <= 40.0 && d.y.abs() <= 40.0 && d.z.abs() <= 40.0
+                    }) {
+                        live.shot.hold = *left;
+                        batch.fired.push(live.shot.clone());
+                    }
+                }
                 if !live.shot.step() {
                     continue;
+                }
+                let owner = *owners.entry(live.owner).or_insert_with(|| actor_of(host, live.owner));
+                let mut resend = false;
+                let mut gone = false;
+                // A held laser goes where its owner goes.
+                if let Some((out, up)) = live.shot.anchor {
+                    let Some(o) = owner else {
+                        batch.gone.push(live.shot.id);
+                        continue;
+                    };
+                    let s = &mut live.shot;
+                    s.pos = o.pos + s.angle * f64::from(out) + v3(0.0, f64::from(up), 0.0);
+                    s.prev = s.pos;
+                    resend = true;
+                }
+                if live.shot.hold == 0 {
+                    let s = &mut live.shot;
+                    match s.special {
+                        // Fantasy Seal's orb homes on the nearest player, twelve degrees a tick at most.
+                        special::FANTASY_ORB if s.ticks >= 15 => {
+                            s.limit = 0.6;
+                            s.accel = 0.03;
+                            if let Some(t) = nearest(s.pos) {
+                                let to = (t + v3(0.0, 0.72, 0.0) - s.pos).normalize();
+                                let axis = cross(s.angle, to);
+                                if axis.length() > 1e-6 {
+                                    let deg = dot(s.angle.normalize(), to).clamp(-1.0, 1.0).acos().to_degrees().min(12.0);
+                                    s.angle = rotate(axis.normalize(), s.angle, deg as f32).normalize();
+                                    s.motion = s.angle * s.speed();
+                                }
+                            }
+                            resend = true;
+                        }
+                        // Bewitching Power Spoiler's scales fly back to their shooter.
+                        special::SPOILER | special::SPOILER_BACK if s.ticks >= 20 => {
+                            if let Some(o) = owner {
+                                s.limit = 1.0;
+                                s.accel = 0.05;
+                                s.angle = angle_to(s.pos, o.pos + v3(0.0, 1.0, 0.0));
+                                s.motion = s.angle * s.speed();
+                                resend = true;
+                                if (s.pos - o.pos).length() < 1.5 {
+                                    gone = true;
+                                    if s.special == special::SPOILER_BACK
+                                        && let Ok(mut b) = ai::BUFFS.lock()
+                                    {
+                                        b.push(live.owner);
+                                    }
+                                }
+                            }
+                        }
+                        // Meteor on Earth's familiar sheds its lights about its shooter's look.
+                        special::METEOR if s.ticks == 1 => {
+                            if let Some(o) = owner {
+                                s.rotate = o.look();
+                                resend = true;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 // Gagouji Cyclone's shots turn at their shooter's target at their end.
                 if live.shot.special == special::SEEK_TARGET && live.shot.ticks >= live.shot.end {
@@ -277,8 +470,11 @@ impl Server {
                     batch.fired.push(s.clone());
                 }
                 // Bursts: shots some specials fire from where they are.
-                let burst = bursts(&live.shot, actor_of(host, live.owner).map(|u| u.look()), &mut self.rng);
-                for child in burst {
+                let full = self.classic.contains(&live.owner);
+                let target = nearest(live.shot.pos);
+                let burst = if live.shot.hold > 0 { Vec::new() } else { bursts(&live.shot, owner.map(|u| u.look()), target, full, &mut self.rng) };
+                for mut child in burst {
+                    child.fancy = live.shot.fancy;
                     let child = self.give_id(child);
                     batch.fired.push(child.clone());
                     fresh.push(Live { shot: child, owner: live.owner });
@@ -289,10 +485,59 @@ impl Server {
                     fantasy_seal(&mut live.shot, from.zip(player.first().copied()));
                     batch.fired.push(live.shot.clone());
                 }
+                let mut hit = gone;
+                // A laser: cut short by a wall, it hits all along itself every tick and stays.
                 let s = &live.shot;
-                let mut hit = false;
-                // A familiar's shot carries on; it doesn't hit.
-                if s.solid() && s.form != form::FAMILIAR {
+                let passes = matches!(s.form, form::FAMILIAR | form::HIDDEN | form::GAP) || (21..=25).contains(&s.form) || s.special == special::SPOILER_BACK;
+                if !hit && s.solid() && s.is_laser() {
+                    let dir = s.angle.normalize();
+                    let (from, length, size, owner_id, damage) = (s.pos, f64::from(s.laser), f64::from(s.size), live.owner, s.damage_for(false, difficulty) * scale(live.owner));
+                    let moving = s.speed() > 1e-6;
+                    if let Some(l) = level {
+                        let mut d = 0.25;
+                        while d < length {
+                            let p = from + dir * d;
+                            if host.level_block(l, [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32]).is_some_and(|b| !passable(&b)) {
+                                if d <= 0.3 && moving {
+                                    hit = true;
+                                } else {
+                                    live.shot.laser = d as f32;
+                                    resend = true;
+                                }
+                                break;
+                            }
+                            d += 0.5;
+                        }
+                    }
+                    let length = f64::from(live.shot.laser);
+                    for (id, ours, b) in &bodies {
+                        if *id == owner_id || *ours {
+                            continue;
+                        }
+                        if ray_box(from, dir, length.max(1e-6), grow(*b, size)).is_some() {
+                            host.hurt_entity(dimension, *id, damage, "minecraft:mob_projectile", Some(owner_id));
+                        }
+                    }
+                } else if !hit && s.solid() && s.special == special::SPOILER {
+                    // The scale marks what it touches (wither and hunger) and turns back, unharmed.
+                    let travel = s.pos - s.prev;
+                    let reach = travel.length();
+                    let dir = if reach > 1e-9 { travel * (1.0 / reach) } else { v3(0.0, 1.0, 0.0) };
+                    let (prev, size) = (s.prev, f64::from(s.size));
+                    let touched = bodies.iter().find(|(id, ours, b)| *id != live.owner && !*ours && ray_box(prev, dir, reach.max(1e-6), grow(*b, size * 0.5)).is_some());
+                    if let Some((id, _, _)) = touched {
+                        if let Some(uuid) = player_ids.get(id) {
+                            for effect in ["minecraft:wither", "minecraft:hunger"] {
+                                host.add_effect(*uuid, &NativeEffect { id: effect.into(), amplifier: 1, duration: 400, ambient: false, particles: true });
+                            }
+                        }
+                        live.shot.special = special::SPOILER_BACK;
+                        resend = true;
+                    }
+                }
+                let s = &live.shot;
+                // A familiar's shot carries on; it doesn't hit; nor do the unseen ones, nor lasers here.
+                if !hit && s.solid() && !passes && !s.is_laser() && s.special != special::SPOILER {
                     let travel = s.pos - s.prev;
                     let reach = travel.length();
                     let dir = if reach > 1e-9 { travel * (1.0 / reach) } else { v3(0.0, 1.0, 0.0) };
@@ -302,7 +547,7 @@ impl Server {
                             continue;
                         }
                         if ray_box(s.prev, dir, reach.max(1e-6), grow(*b, f64::from(s.size) * 0.5)).is_some() {
-                            host.hurt_entity(dimension, *id, s.damage_for(false, difficulty), "minecraft:mob_projectile", Some(live.owner));
+                            host.hurt_entity(dimension, *id, s.damage_for(false, difficulty) * scale(live.owner), "minecraft:mob_projectile", Some(live.owner));
                             hit = true;
                             break;
                         }
@@ -315,6 +560,9 @@ impl Server {
                 if hit {
                     batch.gone.push(live.shot.id);
                 } else {
+                    if resend {
+                        batch.fired.push(live.shot.clone());
+                    }
                     kept.push(live);
                 }
             }
@@ -343,6 +591,88 @@ impl Server {
             let data = shot_full(old.form, 7, old.size, old.damage, 0, old.end - old.ticks + 50, special::FREEZE);
             fired.push(Shot::new(old.pos, a, 0.0, pattern::rotate_default(), 0.0, 9999, 1e-4, 1e-4, 0.0, V3::ZERO, data));
         }
+    }
+
+    /// Killing Doll in stopped time: a quarter of the caster's knives (form 28, colour 0 or 1) within
+    /// twenty blocks of the card are taken up and thrown again at the target, red.
+    #[allow(clippy::too_many_arguments)]
+    fn redirect(&mut self, dimension: &str, mob: u32, card: V3, target: Option<V3>, eye: f64, fired: &mut Vec<Shot>, gone: &mut Vec<u32>) {
+        let Server { shots, rng, .. } = self;
+        let Some(shots) = shots.get_mut(dimension) else { return };
+        let mut taken = Vec::new();
+        shots.retain(|live| {
+            let s = &live.shot;
+            let d = s.pos - card;
+            let near = d.x.abs() <= 20.0 && d.y.abs() <= 20.0 && d.z.abs() <= 20.0;
+            if live.owner == mob && near && s.form == form::KNIFE && s.color <= 1 && rng.int(100) < 25 {
+                taken.push(s.pos);
+                gone.push(s.id);
+                false
+            } else {
+                true
+            }
+        });
+        let mut fire = Fire { out: fired, rng: &mut self.rng };
+        for at in taken {
+            let at = v3(at.x, at.y - (eye - 0.25), at.z);
+            let way = match target {
+                Some(t) => angle_to(at, t),
+                None => vec::angle_random(fire.rng),
+            };
+            let first = 0.2 + fire.rng.double() * 0.5;
+            fire.shot(at, way, 0.0, first, 0.7, 0.02, V3::ZERO, shot_full(form::KNIFE, 2, shot::SIZE[28], 12.0, 0, 80, 0));
+        }
+    }
+
+    /// The classic bosses' bars: each player within 64 blocks sees the boss's health in all its cards,
+    /// its name and the card it is casting. A bar goes when its boss is gone or out of reach.
+    fn boss_bars(&mut self, host: &mut dyn Host, dimension: &str) {
+        let players: Vec<_> = host.server_players().into_iter().filter(|p| p.dimension == dimension).collect();
+        let mut want: HashMap<(u128, u32), (String, i32, String)> = HashMap::new();
+        for (id, kind, at) in host.level_entities(dimension) {
+            if !is_classic(&kind) {
+                continue;
+            }
+            let Some(spec) = mobs::by_kind(&kind) else { continue };
+            let health = ai::status(id).map_or(spec.max_health(), |s| s.0);
+            if health <= 0.0 {
+                continue;
+            }
+            let max = spec.max_health();
+            let fill = ((health / max).clamp(0.0, 1.0) * 1000.0) as i32;
+            let card = self.casts.get(dimension).and_then(|c| c.iter().find(|c| c.mob == id)).map(|c| c.card.info().name);
+            let name = match card {
+                Some(card) => format!("{}: {card}", spec.name),
+                None => spec.name.to_owned(),
+            };
+            for p in &players {
+                let d = V3::from_array(p.position) - V3::from_array(at);
+                if d.length() <= 64.0 {
+                    want.insert((p.uuid, id), (dimension.to_owned(), fill, name.clone()));
+                }
+            }
+        }
+        let bar_id = |mob: u32| 0x7468_6d6f_6273_0000_0000_0000_0000_0000u128 | u128::from(mob);
+        for (key, value) in &want {
+            if self.bars.get(key) != Some(value) {
+                let bar = NativeBossBar {
+                    name: Text::literal(&value.2),
+                    progress: value.1 as f32 / 1000.0,
+                    color: 5,
+                    overlay: 0,
+                    darken: false,
+                    music: false,
+                    fog: false,
+                };
+                host.boss_bar(key.0, bar_id(key.1), Some(&bar));
+            }
+        }
+        let stale: Vec<(u128, u32)> = self.bars.iter().filter(|(k, v)| v.0 == dimension && !want.contains_key(k)).map(|(k, _)| *k).collect();
+        for key in stale {
+            host.boss_bar(key.0, bar_id(key.1), None);
+            self.bars.remove(&key);
+        }
+        self.bars.extend(want);
     }
 
     /// Where something may stand in column `x`, `z` near height `near`: on the surface in the
@@ -440,20 +770,24 @@ impl Server {
             for _ in 0..count {
                 let (dx, dz) = (self.rng.int(5) as i32 - 2, self.rng.int(5) as i32 - 2);
                 let at = [f64::from(x + dx) + 0.5, f64::from(y) + 0.1, f64::from(z + dz) + 0.5];
-                summon(host, dimension, mob, at);
+                // Now and then the classic version comes instead.
+                let this = mobs::classic_of(mob).filter(|_| self.rng.int(CLASSIC_IN) == 0).unwrap_or(mob);
+                summon(host, dimension, this, at);
             }
         }
     }
 }
 
-/// The shots a special fires from where its shot is, this tick.
-fn bursts(s: &Shot, owner_look: Option<V3>, rng: &mut Rng) -> Vec<Shot> {
+/// The shots a special fires from where its shot is, this tick: `target` is the nearest player's
+/// middle, `full` whether its shooter fires at the original's full rate.
+fn bursts(s: &Shot, owner_look: Option<V3>, target: Option<V3>, full: bool, rng: &mut Rng) -> Vec<Shot> {
     let mut out = Vec::new();
     // A spray that runs every tick runs only on the mobs' share of them.
     let paced = |t: i32| ((t as f32) * ai::PACE).floor() != ((t - 1) as f32 * ai::PACE).floor();
-    if (11600..=11602).contains(&s.special) && !paced(s.ticks) {
+    if !full && (11600..=11602).contains(&s.special) && !paced(s.ticks) {
         return out;
     }
+    let level = ai::level();
     let mut fire = Fire { out: &mut out, rng };
     match s.special {
         // Marisa's familiars spray stars as they circle.
@@ -475,6 +809,72 @@ fn bursts(s: &Shot, owner_look: Option<V3>, rng: &mut Rng) -> Vec<Shot> {
         special::MISFORTUNE_RING if s.ticks == 10 => {
             let d = shot_full(0, s.color, shot::SIZE[0], s.damage, 0, 60, 0);
             fire.circle(s.pos, s.angle, 0.0, 0, 0.5, 0.0, 0.0, V3::ZERO, d, 36, 0.0, 0.0);
+        }
+        // Stardust Reverie's big star sheds a small one each tick, round its axis.
+        special::STARDUST => {
+            let way = rotate(s.rotate, s.angle, s.ticks as f32 * 13.0);
+            let d = shot_full(s.form, s.color, 0.3, 5.0, 10, 50, 0);
+            fire.shot_turning(s.pos, way, s.slope, s.rotate, 0.0, 9999, 0.1, 0.3, 0.03, V3::ZERO, d);
+        }
+        // Meteor on Earth's familiar: a light every other tick, still until its thirtieth.
+        special::METEOR if s.ticks % 2 == 0 => {
+            let way = rotate(s.angle, s.rotate, s.ticks as f32 * 13.0);
+            fire.shot(s.pos, way, 0.0, 0.0, 0.5, 0.0, V3::ZERO, shot::shot(0, 5, 5, 40, special::METEOR_LIGHT));
+        }
+        // Miracle Fruit's oval bursts at its end into eight lines of six.
+        special::MIRACLE_FRUIT if s.ticks == s.end => {
+            let mut a = fire.rng.float() * 360.0;
+            for _ in 0..8 {
+                let look = rotate(s.rotate, s.angle, a);
+                for i in 0..6 {
+                    fire.shot_turning(s.pos, look, 0.0, s.rotate, 0.0, 9999, 0.5, 0.2, 0.8, V3::ZERO, shot_full(0, 0, 0.3, 6.0, 3 + i * 2, 90, 0));
+                }
+                a += 45.0;
+            }
+        }
+        // Flying-glowworm Nest's gap fires its laser.
+        special::GAP if s.ticks == 5 => {
+            fire.laser_a(s.pos, s.angle, 0.1, 1.4, 0.1, V3::ZERO, pattern::laser(4, 0.1, 4.0, 8.0, 0, 40, 0));
+        }
+        // Curse of Dreams and Reality.
+        special::CURSE_ORB if s.ticks == s.end => {
+            fire.shot(s.pos, s.angle, 0.0, 0.0, 0.0, 0.0, V3::ZERO, shot_full(form::HIDDEN, 0, 0.0, 0.0, 0, 10, special::CURSE_EMIT));
+        }
+        special::CURSE_EMIT if s.ticks % 2 == 0 => {
+            let yaw = -vec::yaw_of(s.angle.x, s.angle.z) + (s.ticks * 5) as f32;
+            let pitch = -(s.angle.y.clamp(-1.0, 1.0).asin().to_degrees() as f32);
+            let d = shot_full(10, 5, shot::SIZE[10], 3.0, 0, 5, special::CURSE_SEEK);
+            fire.sphere(s.pos, angle(yaw, pitch), 0.0, pattern::rotate_default(), 0.0, 9999, 0.35, 0.35, 0.0, V3::ZERO, d, (4 * level) as usize, 0.1, 0.0);
+        }
+        special::CURSE_SEEK if s.ticks == s.end => {
+            let way = target.map_or(s.angle, |t| angle_to(s.pos, t));
+            fire.shot(s.pos, way, 0.0, 0.45, 0.45, 0.0, V3::ZERO, shot_full(10, 5, shot::SIZE[10], 4.0, 0, 80, 0));
+        }
+        special::CURSE_SPLIT if s.ticks == s.end => {
+            let mut corner = |dx: i32, dy: i32, dz: i32, color: u8| {
+                let at = s.pos + v3(f64::from(dx), f64::from(dy), f64::from(dz));
+                let d = shot_full(6, color, shot::SIZE[6] * 1.5, 4.0, 0, 80, 0);
+                fire.sphere(at, s.angle, 0.0, pattern::rotate_default(), 0.0, 9999, 0.2, 0.2, 0.0, V3::ZERO, d, (4 * level) as usize, 0.1, 0.0);
+            };
+            for i in [-1, 1] {
+                for j in [-1, 1] {
+                    for k in [-1, 1] {
+                        corner(i, j, k, 5);
+                    }
+                }
+            }
+            for i in [-2, 0, 2] {
+                for j in [-2, 0, 2] {
+                    for k in [-2, 0, 2] {
+                        corner(i, j, k, 2);
+                    }
+                }
+            }
+        }
+        // Mesh of Light and Darkness: each hanging shot sets a laser along its way.
+        special::MESH if s.ticks == 1 => {
+            let l = pattern::laser(i32::from(s.color), 0.5, 20.0, s.damage, 20, s.end, 0);
+            fire.laser_b(s.pos + s.angle, s.angle, pattern::rotate_default(), 0.0, 9999, l, None);
         }
         special::MISFORTUNE_MARK if s.ticks == s.end => {
             let d = shot_full(14, s.color, shot::SIZE[14], s.damage, 0, 60, 0);
@@ -524,6 +924,89 @@ fn fantasy_seal(s: &mut Shot, aim: Option<(V3, V3)>) {
     }
 }
 
+/// Whether a gap made global with a Yukari umbrella is by `to`: Yukari Gaps keeps its gaps in
+/// `yukari_gap/gaps.tsv` in the world, a line each (`H`, dimension, x, y, z of its lower half,
+/// facing, owner, locked, global, ...).
+fn global_gap_near(host: &dyn Host, dimension: &str, to: [i32; 3]) -> bool {
+    let Some(dir) = host.world_dir() else { return false };
+    let text = std::fs::read_to_string(dir.join("yukari_gap").join("gaps.tsv")).unwrap_or_default();
+    global_gap_in(&text, dimension, to)
+}
+
+fn global_gap_in(text: &str, dimension: &str, to: [i32; 3]) -> bool {
+    text.lines().any(|line| {
+        let f: Vec<&str> = line.split('\t').collect();
+        let at = |i: usize| f.get(i).and_then(|v| v.parse::<i32>().ok());
+        let (Some(x), Some(y), Some(z)) = (at(2), at(3), at(4)) else { return false };
+        f.first() == Some(&"H")
+            && f.get(1) == Some(&dimension)
+            && f.get(8) == Some(&"1")
+            && (x - to[0]).abs() <= 2
+            && (-3..=2).contains(&(y - to[1]))
+            && (z - to[2]).abs() <= 2
+    })
+}
+
+/// The boss `id` on to the phase `next`: a moment unhurt, its attack started over, its danmaku gone.
+fn begin_phase(id: u32, next: &mobs::Phase) {
+    if let Ok(mut bosses) = ai::BOSSES.lock() {
+        bosses.insert(id, ai::Boss { phase: next.to, counter: Some(-next.interval), invincible: next.invincible, ai: next.ai });
+    }
+    if let Ok(mut server) = SERVER.lock() {
+        for (_, shots) in server.shots.iter_mut() {
+            shots.retain(|l| l.owner != id);
+        }
+        for (_, casts) in server.casts.iter_mut() {
+            casts.retain(|c| c.mob != id);
+        }
+        for (_, stops) in server.stops.iter_mut() {
+            stops.retain(|s| s.mob != id);
+        }
+    }
+}
+
+/// The classic bosses' cards, as the Wither's phases: each has all its cards' health in one bar, and
+/// each card's worth it loses breaks the card it is on and starts the next. One blow can break only
+/// one card: past that, it starts the next card with that card's full share.
+fn classic_cards(host: &mut dyn Host, dimension: &str) {
+    for (id, kind, _) in host.level_entities(dimension) {
+        if !is_classic(&kind) {
+            continue;
+        }
+        let Some(spec) = mobs::by_kind(&kind) else { continue };
+        let Some((health, _)) = ai::status(id) else { continue };
+        if health <= 0.0 {
+            continue;
+        }
+        let phase = ai::phase_of(id, spec);
+        let card = spec.card_of(phase);
+        let due = spec.card_at(health);
+        if due <= card {
+            continue;
+        }
+        let Some(next) = spec.phases.iter().find(|p| p.from == phase) else { continue };
+        explode(host, id, false);
+        begin_phase(id, next);
+        if due > card + 1 {
+            let top = spec.top_of(card + 1);
+            host.set_mob_health(dimension, id, top);
+            if let Ok(mut s) = ai::STATUS.lock() {
+                s.insert(id, (top, next.to));
+            }
+        }
+    }
+}
+
+/// A classic boss's spell broken (a blast) or the boss beaten (a great one).
+fn explode(host: &mut dyn Host, id: u32, last: bool) {
+    let Some(entity) = host.entity(id) else { return };
+    let (Some(at), Some(level)) = (host.entity_position(entity), host.entity_level(entity)) else { return };
+    let at = [at[0], at[1] + 1.0, at[2]];
+    let (kind, count, volume) = if last { (ParticleType::ExplosionEmitter, 2, 4.0) } else { (ParticleType::Explosion, 6, 2.0) };
+    host.level_send_particles(level, &ParticleOptions::simple(kind), None, at, [0.6, 0.6, 0.6], 0.0, count);
+    host.level_play_sound(level, "minecraft:entity.generic.explode", at, 5, volume, if last { 0.8 } else { 1.2 });
+}
+
 /// A trade for a wandering trader's `Offers`: `count` of `buy` for one `sell`.
 fn offer(buy: &str, count: i32, sell: &str) -> Tag {
     let stack = |id: &str, count: i32| -> Tag {
@@ -541,7 +1024,9 @@ fn offer(buy: &str, count: i32, sell: &str) -> Tag {
 }
 
 fn summon(host: &mut dyn Host, dimension: &str, mob: &mobs::Mob, at: [f64; 3]) -> Option<u32> {
-    let mut nbt: Compound = [("Silent".into(), Tag::Byte(1)), ("Health".into(), Tag::Float(mob.health.to_bits()))].into();
+    // A classic boss comes with all its cards' health.
+    let health = if mob.classic() { mob.max_health() } else { mob.health };
+    let mut nbt: Compound = [("Silent".into(), Tag::Byte(1)), ("Health".into(), Tag::Float(health.to_bits()))].into();
     if mob.id == "rinnosuke" {
         // The one trade of his made of vanilla things; the rest are Touhou Items Mod's items, to come.
         let offers: Compound = [("Recipes".into(), Tag::List(vec![offer("minecraft:gold_ingot", 1, "minecraft:ender_pearl")]))].into();
@@ -586,9 +1071,152 @@ fn strip(form: u8) -> Option<&'static str> {
 }
 
 const LIGHT: &str = "thmobs:entity/shot/light";
+/// Plain white: the classic shapes and the lasers are drawn on it, tinted.
+const WHITE: &str = "thmobs:entity/shot/laser";
+const GAP: &str = "thmobs:entity/shot/gap";
+const SPARK: &str = "thmobs:entity/shot/spark";
+/// The rainbow's order, for Fantasy Seal's orbs.
+const RAINBOW: [usize; 7] = [0, 6, 3, 2, 5, 1, 4];
 
-fn draw_shot(host: &dyn Host, draw: &mut NativeWorldDraw, s: &Shot, right: V3, up: V3) {
+/// A quad about `at`, both faces, so it shows whichever way it is turned.
+fn quad(host: &dyn Host, draw: &mut NativeWorldDraw, sprite: &str, at: V3, corners: [V3; 4], uv: [f32; 4], rgba: [u8; 4]) {
+    draw.push();
+    if draw.translate_world(at.array()) {
+        let c = |p: V3| [p.x as f32, p.y as f32, p.z as f32];
+        let [a, b, d, e] = corners;
+        host.world_quad(draw, sprite, [c(a), c(b), c(d), c(e)], uv, rgba);
+        host.world_quad(draw, sprite, [c(e), c(d), c(b), c(a)], uv, rgba);
+    }
+    draw.pop();
+}
+
+/// A kite `l` long each way along `along` and `w` wide each way along `side`.
+fn kite(along: V3, side: V3, l: f64, w: f64) -> [V3; 4] {
+    [along * l, side * w, -(along * l), -(side * w)]
+}
+
+/// A laser (`RenderTHLaser`): a beam from where it is along its way, thin while it waits out its
+/// delay; Master Spark's wide and bright.
+fn draw_laser(host: &dyn Host, draw: &mut NativeWorldDraw, s: &Shot, right: V3, forward: V3) {
+    let partial = f64::from(draw.partial);
+    let base = s.prev.lerp(s.pos, partial);
+    let dir = s.angle.normalize();
+    let length = f64::from(s.laser);
+    if length <= 0.0 {
+        return;
+    }
+    let mut side = cross(dir, forward);
+    if side.length() < 1e-6 {
+        side = right;
+    }
+    let side = side.normalize();
+    let tint = TINT[usize::from(s.color % 8)];
+    let ribbon = |h: f64| [side * h, side * h + dir * length, -(side * h) + dir * length, -(side * h)];
+    let full = [0.0, 0.0, 16.0, 16.0];
+    let width = f64::from(s.size);
+    if s.count < 0 {
+        quad(host, draw, WHITE, base, ribbon(0.04), full, [tint[0], tint[1], tint[2], 150]);
+        return;
+    }
+    if s.form == shot::LASER_SPARK {
+        let hue = TINT[RAINBOW[(s.count / 2).rem_euclid(7) as usize]];
+        quad(host, draw, WHITE, base, ribbon(width * 0.6), full, [hue[0], hue[1], hue[2], 110]);
+        quad(host, draw, SPARK, base, ribbon(width * 0.45), [0.0, 8.0, 16.0, 16.0], [255, 255, 255, 210]);
+        quad(host, draw, WHITE, base, ribbon(width * 0.22), full, [255, 255, 255, 255]);
+    } else {
+        quad(host, draw, WHITE, base, ribbon((width * 0.6).max(0.06)), full, [tint[0], tint[1], tint[2], 110]);
+        quad(host, draw, WHITE, base, ribbon((width * 0.4).max(0.04)), full, [tint[0], tint[1], tint[2], 210]);
+        quad(host, draw, WHITE, base, ribbon((width * 0.18).max(0.02)), full, [255, 255, 255, 255]);
+    }
+}
+
+/// The classic bosses' shapes, flat and turned to the camera, pointed along their course: stars that
+/// spin, butterflies, rice, scales, icicles, kunai, arrows, knives, ovals and amulets. False for a
+/// form drawn the old way.
+fn draw_fancy(host: &dyn Host, draw: &mut NativeWorldDraw, s: &Shot, at: V3, right: V3, up: V3, forward: V3) -> bool {
+    let tint = TINT[usize::from(s.color % 8)];
+    let size = f64::from(s.size);
+    let full = [0.0, 0.0, 16.0, 16.0];
+    let way = if s.motion.length() > 1e-6 { s.motion } else { s.angle };
+    let mut along = way - forward * dot(way, forward);
+    if along.length() < 1e-6 {
+        along = up;
+    }
+    let along = along.normalize();
+    let side = cross(along, forward).normalize();
+    let colour = [tint[0], tint[1], tint[2], 230];
+    let white = [255, 255, 255, 255];
+    match s.form {
+        form::STAR | form::SMALL_STAR => {
+            let spin = (f64::from(s.count) + f64::from(draw.partial)) * 0.15;
+            let big = size * 0.75;
+            for (scale, rgba) in [(1.0, colour), (0.5, white)] {
+                let (outer, inner) = (big * scale, big * scale * 0.42);
+                for k in 0..5 {
+                    let t = spin + f64::from(k) * std::f64::consts::TAU / 5.0;
+                    let point = |r: f64, a: f64| (right * a.cos() + up * a.sin()) * r;
+                    let half = std::f64::consts::PI / 5.0;
+                    quad(host, draw, WHITE, at, [point(outer, t), point(inner, t + half), V3::ZERO, point(inner, t - half)], full, rgba);
+                }
+            }
+        }
+        form::BUTTERFLY => {
+            for turn in [55.0f64, -55.0] {
+                let wing = (along * turn.to_radians().cos() + side * turn.to_radians().sin()).normalize();
+                let wing_side = cross(wing, forward).normalize();
+                quad(host, draw, WHITE, at + wing * (size * 0.3), kite(wing, wing_side, size * 0.4, size * 0.22), full, colour);
+            }
+            quad(host, draw, WHITE, at, kite(along, side, size * 0.3, size * 0.08), full, white);
+        }
+        form::AMULET => {
+            let (l, w) = (size * 0.8, size * 0.45);
+            let rect = |k: f64| [along * l * k + side * w * k, along * l * k - side * w * k, -(along * l * k) - side * w * k, -(along * l * k) + side * w * k];
+            quad(host, draw, WHITE, at, rect(1.0), full, colour);
+            quad(host, draw, WHITE, at, rect(0.55), full, white);
+        }
+        _ => {
+            let (l, w) = match s.form {
+                form::RICE => (1.0, 0.45),
+                form::SCALE => (0.75, 0.55),
+                form::CRYSTAL => (1.2, 0.38),
+                form::KUNAI => (1.3, 0.32),
+                form::ARROW => (1.5, 0.22),
+                form::KNIFE => (1.5, 0.28),
+                form::OVAL => (0.9, 0.6),
+                _ => return false,
+            };
+            quad(host, draw, WHITE, at, kite(along, side, size * l, size * w), full, colour);
+            quad(host, draw, WHITE, at, kite(along, side, size * l * 0.55, size * w * 0.5), full, white);
+        }
+    }
+    true
+}
+
+fn draw_shot(host: &dyn Host, draw: &mut NativeWorldDraw, s: &Shot, right: V3, up: V3, forward: V3) {
+    if s.is_laser() {
+        draw_laser(host, draw, s, right, forward);
+        return;
+    }
+    if s.form == form::HIDDEN || (21..=25).contains(&s.form) {
+        return;
+    }
     let at = s.prev.lerp(s.pos, f64::from(draw.partial));
+    if s.form == form::GAP {
+        let h = f64::from(s.size) * 0.5;
+        quad(host, draw, GAP, at, [-right * h + up * (h * 0.66), -right * h - up * (h * 0.66), right * h - up * (h * 0.66), right * h + up * (h * 0.66)], [0.0, 0.0, 12.0, 16.0], [255, 255, 255, 255]);
+        return;
+    }
+    if s.special == special::FANTASY_ORB {
+        let tint = TINT[RAINBOW[(s.id % 7) as usize]];
+        let h = f64::from(s.size) * 0.5;
+        for (half, rgba) in [(h * 1.3, [tint[0], tint[1], tint[2], 170]), (h * 0.8, [tint[0], tint[1], tint[2], 230]), (h * 0.4, [255, 255, 255, 255])] {
+            quad(host, draw, LIGHT, at, [-right * half + up * half, -right * half - up * half, right * half - up * half, right * half + up * half], [0.0, 0.0, 8.0, 16.0], rgba);
+        }
+        return;
+    }
+    if s.fancy && s.count >= 0 && draw_fancy(host, draw, s, at, right, up, forward) {
+        return;
+    }
     let color = usize::from(s.color % 8);
     let tint = TINT[color];
     let frame = f32::from(u8::from(s.count.rem_euclid(2) == 1)) * 8.0;
@@ -748,7 +1376,19 @@ fn pose(root: &mut ModelPart, model: &str, mob: &NativeMobRender<'_>) {
 /// Point and power items (Touhou Items'), as the original's fairies dropped `EntityTHItem`s: one to
 /// three points from a fairy and now and then a power item; ten to twenty from a boss, with big power
 /// items, and sometimes full power, an extend or a bomb.
-fn drop_points(host: &mut dyn Host, id: u32, boss: bool) {
+/// The Yukari umbrella (Yukari Gaps): Yukari drops it 70 times in 100, the Great Doll every time.
+const UMBRELLA: &str = "yukari_gap:yukari_umbrella";
+
+/// The chance, in percent, that the mob `kind` drops a Yukari umbrella when beaten.
+fn umbrella_chance(kind: &str) -> u32 {
+    match kind {
+        GREAT_DOLL => 100,
+        "thmobs:yukari" | "thmobs:classic_yukari" => 70,
+        _ => 0,
+    }
+}
+
+fn drop_points(host: &mut dyn Host, id: u32, boss: bool, kind: &str) {
     let Some(entity) = host.entity(id) else { return };
     let (Some(at), Some(level)) = (host.entity_position(entity), host.entity_level(entity)) else { return };
     let dimension = level.dimension().to_owned();
@@ -776,6 +1416,9 @@ fn drop_points(host: &mut dyn Host, id: u32, boss: bool) {
         if roll(25) == 0 {
             drops.push(("thkaguyamod:big_power_item", 1));
         }
+    }
+    if roll(100) < umbrella_chance(kind) {
+        drops.push((UMBRELLA, 1));
     }
     for (id, count) in drops {
         let item: Compound = [("id".into(), Tag::String(id.into())), ("count".into(), Tag::Int(count as i32))].into();
@@ -820,31 +1463,31 @@ impl Hooks for Mod {
     }
 
     /// A boss out of health goes on to its next phase, as `moveDanmakuAttack` had it: back to full
-    /// health of the next, a moment unhurt, its danmaku gone.
+    /// health of the next, a moment unhurt, its danmaku gone. A classic boss goes on to its next
+    /// card before then (`classic_cards`); this is for one felled from a card that wasn't its last
+    /// in one blow, which leaves it at the start of its next.
     fn living_death(&self, host: &mut dyn Host, event: &mut LivingDeathEvent<'_>) -> Flow {
         let Some(spec) = mobs::by_kind(event.kind) else { return Flow::Continue };
         let phase = ai::phase_of(event.entity, spec);
         let next = spec.phases.iter().find(|p| p.from == phase).filter(|p| p.hp > 0.0);
+        let classic = is_classic(event.kind);
+        if classic {
+            explode(host, event.entity, next.is_none());
+        }
         let Some(next) = next else {
             // Gone for good: it scatters Point items, a boss many more than a fairy.
-            drop_points(host, event.entity, !spec.phases.is_empty());
+            drop_points(host, event.entity, !spec.phases.is_empty(), event.kind);
+            if let Ok(mut s) = ai::STATUS.lock() {
+                s.remove(&event.entity);
+            }
             return Flow::Continue;
         };
-        if let Ok(mut bosses) = ai::BOSSES.lock() {
-            bosses.insert(event.entity, ai::Boss { phase: next.to, counter: Some(-next.interval), invincible: next.invincible, ai: next.ai });
-        }
-        for d in DIMENSIONS {
-            if host.set_mob_health(d, event.entity, next.hp) {
-                break;
-            }
-        }
-        if let Ok(mut server) = SERVER.lock() {
-            for (_, shots) in server.shots.iter_mut() {
-                shots.retain(|l| l.owner != event.entity);
-            }
-            for (_, casts) in server.casts.iter_mut() {
-                casts.retain(|c| c.mob != event.entity);
-            }
+        begin_phase(event.entity, next);
+        // The game leaves a mob whose death was canceled at 1 health once this returns: the next
+        // phase's health goes on at the next tick (`level_tick_post`).
+        let hp = if classic { spec.top_of(spec.card_of(next.to)) } else { next.hp };
+        if let Ok(mut r) = REFILL.lock() {
+            r.push((event.entity, hp));
         }
         Flow::Cancel
     }
@@ -927,16 +1570,31 @@ impl Hooks for Mod {
             return;
         }
         let Some(yukari) = mobs::MOBS.iter().find(|m| m.id == "yukari") else { return };
+        let yukari = if global_gap_near(host, event.dimension, to) {
+            // A gap made global with a Yukari umbrella brings the Great Doll instead.
+            let Some(doll) = mobs::by_kind(GREAT_DOLL) else { return };
+            doll
+        } else {
+            mobs::classic_of(yukari)
+                .filter(|_| SERVER.lock().is_ok_and(|mut s| s.rng.int(CLASSIC_IN) == 0))
+                .unwrap_or(yukari)
+        };
         let at = [event.to[0] + 2.0, event.to[1] + 0.5, event.to[2] + 2.0];
         let dimension = event.dimension.to_owned();
         summon(host, &dimension, yukari, at);
     }
 
     fn level_tick_post(&self, host: &mut dyn Host, event: &mut LevelTickPostEvent<'_>) {
+        if let Ok(mut r) = REFILL.lock() {
+            r.retain(|&(id, hp)| !host.set_mob_health(event.dimension, id, hp));
+        }
+        classic_cards(host, event.dimension);
         let batch = match SERVER.lock() {
             Ok(mut server) => {
                 server.spawn(host, event.dimension);
-                server.tick(host, event.dimension)
+                let batch = server.tick(host, event.dimension);
+                server.boss_bars(host, event.dimension);
+                batch
             }
             Err(_) => return,
         };
@@ -988,7 +1646,7 @@ impl Hooks for Mod {
         let right = v3(-yaw.cos(), 0.0, -yaw.sin());
         let up = vec::cross(right, forward);
         for s in shots.values() {
-            draw_shot(host, event.draw, s, right, up);
+            draw_shot(host, event.draw, s, right, up, forward);
         }
         draw_glows(host, event.draw, right, up);
     }
@@ -1057,6 +1715,20 @@ mod tests {
     }
 
     #[test]
+    fn only_global_gaps_by_the_arrival_bring_the_great_doll() {
+        let o = "0".repeat(32);
+        let text = format!("H\tminecraft:overworld\t10\t64\t10\teast\t{o}\t0\t1\t\t\tHome\nH\tminecraft:overworld\t50\t64\t50\teast\t{o}\t0\t0\t\t\tAway\n");
+        assert!(global_gap_in(&text, "minecraft:overworld", [11, 64, 10]));
+        assert!(!global_gap_in(&text, "minecraft:the_nether", [11, 64, 10]));
+        assert!(!global_gap_in(&text, "minecraft:overworld", [51, 64, 50]));
+        assert!(!global_gap_in(&text, "minecraft:overworld", [30, 64, 30]));
+        assert!(is_classic(GREAT_DOLL));
+        assert_eq!(umbrella_chance(GREAT_DOLL), 100);
+        assert_eq!(umbrella_chance("thmobs:yukari"), 70);
+        assert_eq!(umbrella_chance("thmobs:reimu"), 0);
+    }
+
+    #[test]
     fn only_our_kinds_are_ours() {
         assert!(is_ours("thmobs:fairy"));
         assert!(!is_ours("minecraft:wandering_trader"));
@@ -1079,6 +1751,51 @@ mod tests {
         }
         let json = format!("[\n  {}\n]\n", rows.join(",\n  "));
         std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/../../mobs.json"), json).unwrap();
+    }
+
+    /// Each classic card with what its shots fire in turn (the server's bursts), for 300 ticks: no
+    /// pattern runs away, and every shot stays a real place, way and laser.
+    #[test]
+    fn classic_cards_and_their_bursts_stay_in_bounds() {
+        for card in cards::CLASSIC {
+            let user = Actor { pos: v3(0.0, 64.0, 0.0), eye_height: 1.62, yaw: 10.0, pitch: 0.0 };
+            let target = v3(4.0, 65.0, 14.0);
+            let mut rng = Rng::new(11);
+            let mut live: Vec<Shot> = Vec::new();
+            let mut state = [0.0; 2];
+            let mut most = 0;
+            for time in 0..300 {
+                if time < card.info().end {
+                    let ctx = Ctx {
+                        time,
+                        level: 2,
+                        user,
+                        target,
+                        target_alive: true,
+                        card: card_position(&user),
+                        card_yaw: user.yaw,
+                        card_pitch: user.pitch,
+                        user_height: 1.8,
+                    };
+                    card.tick(&ctx, &mut state, &mut Fire { out: &mut live, rng: &mut rng }, &mut Vec::new());
+                }
+                let mut next = Vec::with_capacity(live.len());
+                for mut s in live.drain(..) {
+                    if !s.step() {
+                        continue;
+                    }
+                    next.extend(bursts(&s, Some(user.look()), Some(target), true, &mut rng));
+                    next.push(s);
+                }
+                live = next;
+                most = most.max(live.len());
+                assert!(
+                    live.iter().all(|s| s.pos.length().is_finite() && s.angle.length().is_finite() && s.laser.is_finite()),
+                    "{card:?} at {time}"
+                );
+            }
+            assert!(most < 8000, "{card:?}: {most} shots at once");
+        }
     }
 
     #[test]

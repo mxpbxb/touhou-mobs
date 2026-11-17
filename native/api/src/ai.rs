@@ -29,6 +29,23 @@ pub struct Boss {
 
 pub static BOSSES: LazyLock<Mutex<HashMap<u32, Boss>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Each fighting mob's health and phase as its goal last saw them, for the classic bosses' bars: the
+/// server has no other way to a mob's health.
+pub static STATUS: LazyLock<Mutex<HashMap<u32, (f32, i32)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn status(id: u32) -> Option<(f32, i32)> {
+    STATUS.lock().ok().and_then(|s| s.get(&id).copied())
+}
+
+/// Bosses that caught one of their own Bewitching Power Spoiler scales coming back: regeneration and
+/// strength, as the original gave.
+pub static BUFFS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Whether a mob fires at the original's full rate: the old crow tengu and the classic bosses.
+pub fn full_rate(id: &str) -> bool {
+    id == "old_crow_tengu" || id.starts_with("classic_") || id == "yukari_great_doll"
+}
+
 /// The phase a mob is in, for the death hook: its start until a phase ends.
 pub fn phase_of(id: u32, spec: &mobs::Mob) -> i32 {
     BOSSES.lock().ok().and_then(|b| b.get(&id).map(|b| b.phase)).unwrap_or_else(|| mobs::start_of(spec, id))
@@ -351,6 +368,20 @@ impl Goal for Danmaku {
         if let Ok(mut o) = OURS.lock() {
             o.insert(m.id);
         }
+        if self.spec.classic() {
+            if let Ok(mut s) = STATUS.lock() {
+                s.insert(m.id, (m.health, self.phase));
+            }
+            let buffed = BUFFS.lock().is_ok_and(|mut b| {
+                let had = b.contains(&m.id);
+                b.retain(|id| *id != m.id);
+                had
+            });
+            if buffed {
+                m.add_effect("minecraft:regeneration", 400, 1);
+                m.add_effect("minecraft:strength", 400, 1);
+            }
+        }
         if !m.persistent
             && let Some(p) = cx.w.nearest_player
         {
@@ -471,8 +502,8 @@ impl Goal for Danmaku {
         }
 
         // The attack goes on only on its share of ticks.
-        // The old crow tengu fires at the original's full rate.
-        self.pace += if self.spec.id == "old_crow_tengu" { 1.0 } else { PACE };
+        // The old crow tengu and the classic bosses fire at the original's full rate.
+        self.pace += if full_rate(self.spec.id) { 1.0 } else { PACE };
         let advance = self.pace >= 1.0;
         if advance {
             self.pace -= 1.0;

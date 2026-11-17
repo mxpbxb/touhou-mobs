@@ -40,6 +40,10 @@ pub struct Ctx {
     /// Where the card floats: beside its user, as it was cast.
     pub card: V3,
     pub card_yaw: f32,
+    /// The card's pitch: its user's as cast.
+    pub card_pitch: f32,
+    /// How tall its user stands (`height`).
+    pub user_height: f64,
 }
 
 impl Ctx {
@@ -82,7 +86,46 @@ pub enum Card {
     YasakaNoKamikaze,
     EternalMeek,
     HoukaKenran,
+    // ---- The classic bosses' cards (`classic`) ----
+    MusouFuuin,
+    MasterSpark,
+    NijuuKokushichou,
+    SatuzinDoll,
+    HikouchuuNest,
+    StardustReverie,
+    MiracleFruit,
+    YouryokuSpoiler,
+    IcicleFall,
+    NonDirectionalLaser,
+    MoonlightRay,
+    LittleBugStorm,
+    MeteorOnEarth,
+    GagoujiCyclone,
+    DoubleSpark,
+    CurseOfDreamsAndReality,
+    MeshOfLightAndDarkness,
 }
+
+/// The cards only the classic bosses declare.
+pub const CLASSIC: [Card; 17] = [
+    Card::MusouFuuin,
+    Card::MasterSpark,
+    Card::NijuuKokushichou,
+    Card::SatuzinDoll,
+    Card::HikouchuuNest,
+    Card::StardustReverie,
+    Card::MiracleFruit,
+    Card::YouryokuSpoiler,
+    Card::IcicleFall,
+    Card::NonDirectionalLaser,
+    Card::MoonlightRay,
+    Card::LittleBugStorm,
+    Card::MeteorOnEarth,
+    Card::GagoujiCyclone,
+    Card::DoubleSpark,
+    Card::CurseOfDreamsAndReality,
+    Card::MeshOfLightAndDarkness,
+];
 
 pub const CARDS: [Card; 9] = [
     Card::KashoNoEimin,
@@ -123,6 +166,10 @@ impl Card {
             Card::YasakaNoKamikaze => (18, "spell_card_yasaka_no_kamikaze", "Yasaka_no_Kamikaze", "Great Miracle \"Yasaka's Divine Wind\"", 3, 270),
             Card::EternalMeek => (24, "spell_card_eternal_meek", "EternalMeek", "Conjuring \"Eternal Meek\"", 2, 50),
             Card::HoukaKenran => (29, "spell_card_houka_kenran", "HoukaKenran", "Flower Sign \"Gorgeous Sweet Flower\"", 2, 170),
+            classic => {
+                let (number, name, end) = crate::classic::info(classic);
+                (number, "", "", name, 0, end)
+            }
         };
         Info { number, item, icon, name, need_level, end }
     }
@@ -132,13 +179,23 @@ impl Card {
         CARDS.into_iter().find(|c| c.info().number == n)
     }
 
+    /// The card numbered `n` for a classic boss: any card, the classic ones too.
+    pub fn classic_by_number(n: u32) -> Option<Card> {
+        CARDS.into_iter().chain(CLASSIC).find(|c| c.info().number == n)
+    }
+
+    pub fn is_classic(self) -> bool {
+        CLASSIC.contains(&self)
+    }
+
     pub fn by_item(item: &str) -> Option<Card> {
         let name = item.strip_prefix("thkaguyamod:")?;
         CARDS.into_iter().find(|c| c.info().item == name)
     }
 
-    /// One tick of the card. `state` is what a card keeps between ticks.
-    pub fn tick(self, c: &Ctx, state: &mut [f32; 2], fire: &mut Fire) {
+    /// One tick of the card. `state` is what a card keeps between ticks; `fx`, what it asks of the
+    /// world besides its shots.
+    pub fn tick(self, c: &Ctx, state: &mut [f32; 2], fire: &mut Fire, fx: &mut Vec<crate::classic::Fx>) {
         let t = c.time;
         match self {
             Card::KashoNoEimin => {
@@ -265,6 +322,7 @@ impl Card {
                     fire.ring_simple(c.pos_user(), a, 0.4, s, 32, 0.6, 45.0, t as f32 * -2.0);
                 }
             }
+            classic => crate::classic::tick(classic, c, state, fire, fx),
         }
     }
 }
@@ -289,8 +347,10 @@ mod tests {
                 target_alive: true,
                 card: card_position(&user),
                 card_yaw: 0.0,
+                card_pitch: 0.0,
+                user_height: 1.8,
             };
-            card.tick(&ctx, &mut state, &mut Fire { out: &mut out, rng: &mut rng });
+            card.tick(&ctx, &mut state, &mut Fire { out: &mut out, rng: &mut rng }, &mut Vec::new());
         }
         assert!(out.iter().all(|s| s.pos.length().is_finite() && s.motion.length().is_finite()));
         out.len()
@@ -311,6 +371,17 @@ mod tests {
         assert_eq!(run(Card::PerfectFreeze), 53 * 6);
         // Eternal Meek: three knives a tick for forty ticks.
         assert_eq!(run(Card::EternalMeek), 120);
+    }
+
+    #[test]
+    fn classic_numbers_find_classic_cards_only_for_the_classics() {
+        assert_eq!(Card::by_number(1), None);
+        assert_eq!(Card::classic_by_number(1), Some(Card::MasterSpark));
+        assert_eq!(Card::classic_by_number(9), Some(Card::PerfectFreeze));
+        assert_eq!(Card::classic_by_number(1303), Some(Card::MeshOfLightAndDarkness));
+        for card in CLASSIC {
+            assert!(card.info().end > 0 && !card.info().name.is_empty(), "{card:?}");
+        }
     }
 
     #[test]

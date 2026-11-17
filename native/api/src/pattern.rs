@@ -20,6 +20,43 @@ pub fn gravity(y: f64) -> V3 {
     v3(0.0, y, 0.0)
 }
 
+/// `LaserData`: a laser's look (`color`, its form times eight plus its colour, 8 and 9 picking at
+/// random), width, length, damage, delay, end and special.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LaserData {
+    pub color: i32,
+    pub width: f32,
+    pub length: f32,
+    pub damage: f32,
+    pub delay: i32,
+    pub end: i32,
+    pub special: i32,
+}
+
+/// `LaserData.laser(color, width, length, damage, delay, end, special)`.
+pub fn laser(color: i32, width: f32, length: f32, damage: f32, delay: i32, end: i32, special: i32) -> LaserData {
+    LaserData { color, width, length, damage, delay, end, special }
+}
+
+impl LaserData {
+    fn shot(self, rng: &mut Rng) -> ShotData {
+        let color = match self.color {
+            8 => rng.int(8) as i32,
+            9 => rng.int(7) as i32,
+            c => c,
+        };
+        ShotData {
+            form: (color / 8) as u8,
+            color: (color % 8) as u8,
+            size: self.width,
+            damage: self.damage,
+            delay: self.delay,
+            end: self.end,
+            special: self.special,
+        }
+    }
+}
+
 impl Fire<'_> {
     /// `createShot`, all arguments: a random colour is picked for this shot alone.
     #[allow(clippy::too_many_arguments)]
@@ -53,6 +90,49 @@ impl Fire<'_> {
         let pitch = pitch_of(angle.x, angle.y, angle.z);
         let axis = vec_from_angle(yaw, pitch + 90.0, 1.0);
         self.shot_turning(pos, angle, slope, axis, 0.0, 9999, first, limit, accel, gravity, data);
+    }
+
+    /// `createLaserA`: a laser fired like a shot, growing from nothing to its length as it flies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn laser_a(&mut self, pos: V3, angle: V3, first: f64, limit: f64, accel: f64, gravity: V3, l: LaserData) {
+        let data = l.shot(self.rng);
+        let mut s = Shot::new(pos, angle, 0.0, rotate_default(), 0.0, 9999, first, limit, accel, gravity, data);
+        s.laser_max = l.length;
+        self.out.push(s);
+    }
+
+    /// `createWideLaserA`: `way` lasers across `wide` degrees, `distance` out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wide_laser_a(&mut self, pos: V3, angle: V3, first: f64, limit: f64, accel: f64, gravity: V3, l: LaserData, way: i32, wide: f32, distance: f64) {
+        let yaw = yaw_of(angle.x, angle.z);
+        let pitch = pitch_of(angle.x, angle.y, angle.z);
+        let axis = vec_from_angle(-yaw, -pitch + 90.0, 1.0);
+        let mut a = -wide / 2.0;
+        let span = wide / (way - 1).max(1) as f32;
+        let mut color = self.rng.int(7) as usize;
+        for _ in 0..way {
+            let mut each = l;
+            if l.color == 9 {
+                each.color = i32::from(RAINBOW_ORDER[color % 7]);
+                color += 1;
+            }
+            let v = rotate(axis, angle, a);
+            self.laser_a(pos + v * distance, v, first, limit, accel, gravity, each);
+            a += span;
+        }
+    }
+
+    /// `createLaserB`: a laser born whole, held `anchor` = (out along its way, up) from its owner's
+    /// feet if it has one, else standing where it was set; turning `rot_speed` degrees a tick about
+    /// `rotate` until `rot_end`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn laser_b(&mut self, pos: V3, angle: V3, rotate: V3, rot_speed: f32, rot_end: i32, l: LaserData, anchor: Option<(f32, f32)>) {
+        let data = l.shot(self.rng);
+        let mut s = Shot::new(pos, angle, 0.0, rotate, rot_speed, rot_end, 0.0, 0.0, 0.0, V3::ZERO, data);
+        s.laser_max = l.length;
+        s.laser = l.length;
+        s.anchor = anchor;
+        self.out.push(s);
     }
 
     /// `createWideShot`: `way` shots across `wide` degrees.
@@ -317,6 +397,15 @@ mod tests {
             f.random_ring(V3::ZERO, angle(0.0, 0.0), 0.0, 9999, 1.0, 1.0, 0.0, V3::ZERO, shot(0, RANDOM, 0, 60, 0), 5, 0.1, 50.0);
         });
         assert!(shots.iter().all(|s| s.color < 8));
+    }
+
+    #[test]
+    fn wide_lasers_fan_out_and_grow() {
+        let shots = fire(|f| f.wide_laser_a(V3::ZERO, angle(0.0, 0.0), 0.5, 0.5, 0.0, V3::ZERO, laser(7, 0.1, 4.0, 4.0, 0, 80, 0), 3, 30.0, 0.0));
+        assert_eq!(shots.len(), 3);
+        assert!(shots.iter().all(|s| s.is_laser() && s.laser == 0.0 && s.laser_max == 4.0 && s.color == 7));
+        let held = fire(|f| f.laser_b(V3::ZERO, angle(0.0, 0.0), rotate_default(), -2.0, 9999, laser(24, 4.2, 60.0, 8.0, 30, 120, 0), Some((1.0, 0.9))));
+        assert_eq!((held[0].form, held[0].color, held[0].laser), (3, 0, 60.0));
     }
 
     #[test]

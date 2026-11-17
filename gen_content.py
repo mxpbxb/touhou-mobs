@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 jars, out, manifest = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
-NS, VERSION = "thmobs", "0.7.0"
+NS, VERSION = "thmobs", "0.9.0"
 if out.exists():
     shutil.rmtree(out)
 oa, od = out / "assets" / NS, out / "data" / NS
@@ -50,6 +50,11 @@ def copy(a, b):
 
 for name, file in SHEETS.items():
     copy(jars / K / "shot" / file, oa / "textures" / "entity" / "shot" / f"{name}.png")
+# For the classic bosses: plain white (Laser.png), which their shapes and lasers are drawn on, tinted;
+# a gap (SukimaTexture3.png); Master Spark's beam (MasterSpark.png).
+copy(jars / K / "shot" / "Laser.png", oa / "textures" / "entity" / "shot" / "laser.png")
+copy(jars / K / "SukimaTexture3.png", oa / "textures" / "entity" / "shot" / "gap.png")
+copy(jars / K / "MasterSpark.png", oa / "textures" / "entity" / "shot" / "spark.png")
 copy(jars / K / "items" / "spawn_egg.png", oa / "textures" / "item" / "spawn_egg.png")
 copy(jars / K / "items" / "spawn_egg_overlay.png", oa / "textures" / "item" / "spawn_egg_overlay.png")
 

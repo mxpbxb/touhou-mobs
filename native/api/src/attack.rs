@@ -1122,6 +1122,127 @@ pub fn reimu_hostile(a: &mut Atk) {
     }
 }
 
+// ---- The classic bosses: the originals' attacks with all they declared ----
+
+/// Cirno as Touhou Items Mod had her: her second attack's fan of three lasers at 55, 65 and 75 too.
+pub fn classic_cirno(a: &mut Atk) {
+    cirno(a);
+    if a.phase == 2 && matches!(a.c, 55 | 65 | 75) {
+        let speed = 0.3 + f64::from(a.level) * 0.2;
+        let look = a.look();
+        a.fire.wide_laser_a(a.pos, look, speed, speed, 0.0, V3::ZERO, crate::pattern::laser(7, 0.1, 4.0, 4.0, 0, 80, 0), 3, 30.0, 0.0);
+        a.play_shot_sound();
+    }
+}
+
+/// Marisa as Journey To Gensokyo had her: after her third card, her final word, Double Spark
+/// (`finalWord`, at 104). It came only to one who had used no spell card near her.
+pub fn classic_marisa(a: &mut Atk) {
+    marisa(a);
+    if a.phase == 104 {
+        if a.c == 1 {
+            a.use_spell_card(1300);
+        }
+        if a.c >= 110 {
+            a.c = 0;
+        }
+    }
+}
+
+/// A boss whose one card is all she does (`EntitySakuya`, `EntityMiko`): it at once, again every
+/// 140 ticks.
+
+/// A classic boss's spell-card phases from `first` on, one card each in turn (`cards[0]` in phase
+/// `first`, `cards[1]` in the next): the card cast, and cast again a moment after it ends, until the
+/// phase's health runs out. Whether `a` is in one of them.
+fn card_run(a: &mut Atk, first: i32, cards: &[u32]) -> bool {
+    let Some(&card) = usize::try_from(a.phase - first).ok().and_then(|i| cards.get(i)) else { return false };
+    let end = crate::cards::Card::classic_by_number(card).map_or(110, |c| c.info().end);
+    if a.c == 1 {
+        a.use_spell_card(card);
+    } else if a.c >= end + 30 {
+        a.c = 0;
+    }
+    true
+}
+
+/// Classic Reimu: Fantasy Seal, then Bewitching Power Spoiler.
+pub fn classic_reimu(a: &mut Atk) {
+    card_run(a, 101, &[0, 16]);
+}
+
+/// Classic Reimu (Journey To Gensokyo): her fight and Fantasy Seal, then Bewitching Power Spoiler.
+pub fn classic_reimu_hostile(a: &mut Atk) {
+    if !card_run(a, 102, &[16]) {
+        reimu_hostile(a);
+    }
+}
+
+/// Classic Rumia: her fight and Moonlight Ray, then Double Black Death Butterfly.
+pub fn classic_rumia(a: &mut Atk) {
+    if !card_run(a, 102, &[5]) {
+        rumia(a);
+    }
+}
+
+/// Classic Tojiko: her fight and Gagouji's Cyclone, then Non-Directional Laser.
+pub fn classic_toziko(a: &mut Atk) {
+    if !card_run(a, 102, &[25]) {
+        toziko(a);
+    }
+}
+
+/// Sakuya: Eternal Meek, then Killing Doll. The original never let her fight; this is the fight it
+/// had for her.
+pub fn classic_sakuya(a: &mut Atk) {
+    card_run(a, 101, &[24, 8]);
+}
+
+/// Miko: Gagouji's Cyclone, Bewitching Power Spoiler, then Fantasy Seal, the one the original gave her.
+pub fn classic_miko(a: &mut Atk) {
+    card_run(a, 101, &[40, 16, 0]);
+}
+
+/// Sanae: `danmaku01`, a five-pointed star of shots drawn one a tick and let go at once, then her
+/// four cards (Miracle Fruit, Moses's Miracle, Yasaka's Divine Wind, Bewitching Power Spoiler).
+pub fn classic_sanae(a: &mut Atk) {
+    match a.phase {
+        1 => {
+            if a.c < 50 {
+                a.stop = Some(true);
+                let size = 2.0;
+                let div = 10;
+                let step = size / f64::from(div);
+                let mut p = crate::vec::v3(0.0, size, 0.0);
+                let mut ang = 4.39823f32;
+                for i in 0..a.c {
+                    p.x += f64::from(ang.cos()) * step;
+                    p.y += f64::from(ang.sin()) * step;
+                    if i % div == div - 1 {
+                        ang += 2.5132744;
+                    }
+                }
+                let look = a.look();
+                let at = crate::vec::cross(look, p) + a.pos;
+                a.fire.shot(at, look, 0.0, 0.0, 0.5, 0.03, V3::ZERO, shot(1, 1, 55 - a.c, 120, 0));
+            } else if a.c == 50 {
+                a.stop = Some(false);
+                a.play_shot_sound();
+            } else if a.c >= 100 {
+                a.c = 0;
+            }
+        }
+        101..=104 => {
+            if a.c == 1 {
+                a.use_spell_card([14, 17, 18, 16][(a.phase - 101) as usize]);
+            } else if a.c >= 140 {
+                a.c = 0;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn kunai(color: u8, damage: f32, end: i32) -> ShotData {
     shot_full(13, color, SIZE[13], damage, 0, end, 0)
 }

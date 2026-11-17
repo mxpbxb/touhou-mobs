@@ -3,10 +3,21 @@
 # personal use. Their art is the content mod `thmobs`.
 [mod]
 id = "thmobs_native"
-version = "0.8.0"
+version = "0.9.0"
 
 [compatibility]
 horizon_revision = "1fe4e6fe0252c44efd41d882daee0468389f7d5f"
 
 [api]
 path = "api"
+
+# Touhou mobs are wandering traders underneath: none drinks the trader's invisibility potion or milk,
+# so none vanishes at night, and none makes the trader's drink, vanish and reappear sounds (which the
+# game plays even for a Silent mob).
+[[injection]]
+id = "no-trader-drink"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_lib::mobs::trader::<DrinkItem as Goal>::can_use"
+helper = "no_trader_drink.rs"
+bindings = [{ name = "m", ty = "&crate::mobs::Mob", value = "&*m" }]

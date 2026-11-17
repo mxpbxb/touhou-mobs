@@ -38,6 +38,10 @@ pub mod form {
     pub const OVAL: u8 = 16;
     pub const FAMILIAR: u8 = 17;
     pub const ARROW: u8 = 18;
+    /// A shot that is never seen and never hits: an emitter for the shots it fires.
+    pub const HIDDEN: u8 = 19;
+    /// A gap (`EntitySukima`), drawn as one; it never hits.
+    pub const GAP: u8 = 20;
     pub const PHANTOM: u8 = 26;
     pub const AMULET: u8 = 27;
     pub const KNIFE: u8 = 28;
@@ -71,7 +75,55 @@ pub mod special {
     pub const MISFORTUNE_RING: i32 = 30610;
     /// Bad Fortune's mark: at its end a ring of talismans along its shooter's look. The server fires it.
     pub const MISFORTUNE_MARK: i32 = 30611;
+
+    // ---- Touhou Items Mod's spell cards, for the classic bosses ----
+    /// Double Black Death Butterfly's: slows to a hover, sets off at 25 ticks, curls ten degrees a
+    /// tick until 50 (one way by an even colour, the other by an odd one).
+    pub const KOKUSHICHOU: i32 = 500;
+    /// Stardust Reverie's big star: it turns two degrees a tick and sheds small stars. The server
+    /// sheds them.
+    pub const STARDUST: i32 = 1200;
+    /// Miracle Fruit's oval: at its end it bursts into eight lines of six. The server bursts it.
+    pub const MIRACLE_FRUIT: i32 = 1400;
+    /// Youryoku Spoiler's scale: from twenty ticks it flies back at its shooter (1601 once it has
+    /// hit). The server steers it.
+    pub const SPOILER: i32 = 1600;
+    pub const SPOILER_BACK: i32 = 1601;
+    /// Icicle Fall's: at its end it turns square (1901 the other way) and falls.
+    pub const ICICLE_LEFT: i32 = 1900;
+    pub const ICICLE_RIGHT: i32 = 1901;
+    /// Meteor on Earth's familiar sheds lights (3500) that set off at thirty ticks (3510). The server
+    /// sheds them.
+    pub const METEOR: i32 = 3500;
+    pub const METEOR_LIGHT: i32 = 3510;
+    /// Gagouji Cyclone's arrow: stops, then zigzags at ninety degrees every ten ticks.
+    pub const GAGOUJI: i32 = 4000;
+    /// Fantasy Seal's orb (`EntityMusouFuuin`): it grows, slows for fifteen ticks, then homes on its
+    /// target, twelve degrees a tick at most. The server steers it.
+    pub const FANTASY_ORB: i32 = 11110;
+    /// Killing Doll's knife, left hanging by the stopped time: the server sends a quarter of them
+    /// at the target again.
+    pub const KILLING_DOLL: i32 = 800;
+    /// Little Bug Storm's: at its end it turns square and darts out (3401), then flies again as a
+    /// bug light (3402), blinking, then sets off as a rice shot; 3410 to 3412 turn the other way.
+    pub const BUG_STORM: i32 = 3400;
+    pub const BUG_STORM_2: i32 = 3410;
+    /// Curse of Dreams and Reality's yin-yang orbs: at its end one leaves an emitter (11201) that
+    /// sprays shots (11202) which turn at the target at their end; the other (11210) bursts into
+    /// spheres. The server fires them.
+    pub const CURSE_ORB: i32 = 11200;
+    pub const CURSE_EMIT: i32 = 11201;
+    pub const CURSE_SEEK: i32 = 11202;
+    pub const CURSE_SPLIT: i32 = 11210;
+    /// Mesh of Light and Darkness's hanging shot: it sets a laser along its way at its first tick.
+    /// The server sets it.
+    pub const MESH: i32 = 11300;
+    /// Flying-glowworm Nest's gap: at five ticks it fires a laser. The server fires it.
+    pub const GAP: i32 = 10017;
 }
+
+/// A laser's look, by its form (`LaserData.color / 8`): a plain beam, or Master Spark's.
+pub const LASER_SPARK: u8 = 3;
 
 /// `ShotData`: what a pattern asks for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,6 +179,16 @@ pub struct Shot {
     /// `animationCount`: below zero while it waits out its delay, then its age.
     pub count: i32,
     last_time: i32,
+    /// A laser's length now, and the most it reaches; both 0 for a shot that is not a laser.
+    pub laser: f32,
+    pub laser_max: f32,
+    /// A laser held by its owner (`EntityTHSetLaser`): this far out along its way from the owner's
+    /// feet, and this far up. The server moves it with the owner and sends it again each tick.
+    pub anchor: Option<(f32, f32)>,
+    /// Ticks it hangs still in stopped time (Killing Doll), not ageing.
+    pub hold: i32,
+    /// Drawn in the classic bosses' finer shapes.
+    pub fancy: bool,
 }
 
 impl Shot {
@@ -167,7 +229,17 @@ impl Shot {
             ticks: 0,
             count: -data.delay,
             last_time: 0,
+            laser: 0.0,
+            laser_max: 0.0,
+            anchor: None,
+            hold: 0,
+            fancy: false,
         }
+    }
+
+    /// Whether it is a laser.
+    pub fn is_laser(&self) -> bool {
+        self.laser_max > 0.0
     }
 
     pub fn speed(&self) -> f64 {
@@ -182,6 +254,11 @@ impl Shot {
     /// One tick of `EntityTHShot.onUpdate`, without the hit test, which the server makes after it
     /// along the way the shot went. False once the shot has had its time.
     pub fn step(&mut self) -> bool {
+        if self.hold > 0 {
+            self.hold -= 1;
+            self.prev = self.pos;
+            return true;
+        }
         self.ticks += 1;
         self.prev = self.pos;
         if self.count > self.end {
@@ -211,7 +288,26 @@ impl Shot {
         }
         self.pos = self.pos + self.motion;
         self.last_time = self.ticks;
+        // A fired laser (`createLaserA`) grows twice its speed a tick; a held one (`EntityTHSetLaser`),
+        // born whole, grows back six blocks a tick after a wall cut it short.
+        if self.is_laser() {
+            let speed = self.speed() as f32;
+            let grow = if speed > 1e-6 { speed * 2.0 } else { 6.0 };
+            self.laser = (self.laser + grow).min(self.laser_max);
+        }
         true
+    }
+
+    /// `setShotRotationYaw`: turned `degrees` about its axis at once, its speed kept.
+    pub fn turn(&mut self, degrees: f32) {
+        let speed = self.speed();
+        self.angle = rotate(self.rotate, self.angle, degrees);
+        self.motion = self.angle * speed;
+    }
+
+    /// `setSpeed`: `speed` along the way it faces.
+    pub fn set_speed(&mut self, speed: f64) {
+        self.motion = self.angle * speed;
     }
 
     /// `shotAcceleration`: towards `limit`, along the way it faces.
@@ -239,8 +335,56 @@ impl Shot {
         self.last_time = 0;
     }
 
+    /// Little Bug Storm's stages, each ending in `reCreate`.
+    fn bug_storm(&mut self) -> bool {
+        let s = self.special;
+        if self.ticks != self.end || !(special::BUG_STORM..=special::BUG_STORM + 2).contains(&s) && !(special::BUG_STORM_2..=special::BUG_STORM_2 + 2).contains(&s) {
+            return false;
+        }
+        let second = s >= special::BUG_STORM_2;
+        match s % 10 {
+            0 => {
+                self.color = 7;
+                self.size = SIZE[0];
+                self.special += 1;
+                self.end = 20;
+                self.angle = rotate(self.rotate, self.angle, 90.0);
+                self.limit = 0.0;
+                self.accel = -1.0;
+                self.restart(3.0);
+            }
+            1 => {
+                self.form = form::LIGHT;
+                self.color = 3;
+                self.damage = 4.0;
+                self.size = SIZE[1];
+                self.special += 1;
+                self.restart(3.0);
+            }
+            _ => {
+                self.form = form::RICE;
+                self.color = if second { 2 } else { 3 };
+                self.damage = 6.0;
+                self.size = SIZE[10] * 2.0;
+                self.special = 0;
+                self.angle = rotate(self.rotate, self.angle, if second { 135.0 } else { -45.0 });
+                let yaw = crate::vec::yaw_of(self.angle.x, self.angle.z);
+                self.angle.y = f64::from((yaw * 23.0 / 180.0 * 3.141593).sin()) * 30.0 * 0.01;
+                self.angle = self.angle.normalize();
+                self.limit = 0.5;
+                self.accel = 0.02;
+                self.end = 80;
+                self.restart(0.01);
+            }
+        }
+        true
+    }
+
     /// The specials that end a shot by firing it anew from where it is (`reCreate`).
     fn renew(&mut self) -> bool {
+        if self.bug_storm() {
+            return true;
+        }
         let turn = match self.special {
             special::BUG_LEFT => 70.0,
             special::BUG_RIGHT => -70.0,
@@ -288,6 +432,62 @@ impl Shot {
                 self.accel = 0.03;
                 self.special = 0;
             }
+            special::KOKUSHICHOU => {
+                if self.ticks < 25 {
+                    self.motion = self.motion * 0.9;
+                } else if self.ticks == 25 {
+                    self.limit = 2.0;
+                    self.accel = 0.03;
+                } else if self.ticks < 50 {
+                    self.turn(if self.color % 2 == 0 { 10.0 } else { -10.0 });
+                }
+            }
+            special::STARDUST => self.turn(2.0),
+            // The bug light blinks, small white and big yellow, every three ticks.
+            s if (s == special::BUG_STORM + 2 || s == special::BUG_STORM_2 + 2) && self.ticks % 3 == 0 => {
+                if self.color == 3 {
+                    self.color = 7;
+                    self.size = SIZE[1];
+                } else {
+                    self.color = 3;
+                    self.size = SIZE[1] * 2.0;
+                }
+            }
+            special::ICICLE_LEFT | special::ICICLE_RIGHT
+                if (self.special == special::ICICLE_LEFT && self.ticks >= self.end) || self.ticks == self.end =>
+            {
+                self.turn(if self.special == special::ICICLE_LEFT { 90.0 } else { -90.0 });
+                self.end = 120;
+                self.gravity.y = -0.03;
+                self.accel = 0.01;
+                self.limit = 10.0;
+                self.motion = self.angle * self.speed();
+                self.special = 0;
+            }
+            special::METEOR_LIGHT if self.ticks == 30 => self.accel = 0.03,
+            special::GAGOUJI => {
+                if self.ticks == 1 {
+                    self.turn(45.0);
+                    self.accel = -0.099;
+                    self.limit = 0.0;
+                }
+                if self.ticks % 20 == 9 {
+                    self.turn(-90.0);
+                    self.set_speed(1.0);
+                } else if self.ticks % 20 == 19 {
+                    self.turn(90.0);
+                    self.set_speed(1.0);
+                }
+            }
+            special::FANTASY_ORB => {
+                // Its growing: the server's steering does the rest.
+                if self.size < 2.0 {
+                    self.size = (self.size + 0.1).min(2.0);
+                }
+                if self.ticks < 15 {
+                    self.motion = self.motion * 0.8;
+                }
+            }
             _ => {}
         }
     }
@@ -306,7 +506,7 @@ impl Shot {
 
     // ---- On the wire: a client is told a shot once, as it is fired ----
 
-    pub const WIRE: usize = 4 + 3 * 8 + 3 * 4 * 5 + 4 * 8 + 2 + 4 * 2;
+    pub const WIRE: usize = 4 + 3 * 8 + 3 * 4 * 5 + 4 * 8 + 2 + 4 * 2 + 4 * 2 + 4 + 1;
 
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.extend(self.id.to_le_bytes());
@@ -334,6 +534,10 @@ impl Shot {
         out.extend([self.form, self.color]);
         out.extend(self.last_time.to_le_bytes());
         out.extend(self.delay.to_le_bytes());
+        out.extend(self.laser.to_le_bytes());
+        out.extend(self.laser_max.to_le_bytes());
+        out.extend(self.hold.to_le_bytes());
+        out.push(u8::from(self.fancy));
     }
 
     pub fn decode(data: &[u8]) -> Option<(Shot, &[u8])> {
@@ -357,6 +561,9 @@ impl Shot {
         let color = r.u8()?;
         let last_time = r.i32()?;
         let delay = r.i32()?;
+        let (laser, laser_max) = (r.f32()?, r.f32()?);
+        let hold = r.i32()?;
+        let fancy = r.u8()? != 0;
         let [motion, angle, rotate, gravity] = vecs;
         let shot = Shot {
             id,
@@ -381,6 +588,11 @@ impl Shot {
             ticks,
             count,
             last_time,
+            laser,
+            laser_max,
+            anchor: None,
+            hold,
+            fancy,
         };
         Some((shot, r.0))
     }
@@ -551,6 +763,64 @@ mod tests {
             theirs.step();
         }
         assert!((s.pos - theirs.pos).length() < 1e-3, "{:?} {:?}", s.pos, theirs.pos);
+    }
+
+    #[test]
+    fn a_fired_laser_grows_twice_its_speed_a_tick_to_its_length() {
+        let mut s = plain(0.5, 0.5, 0.0, shot(form::SMALL, 0, 0, 80, 0));
+        s.laser_max = 4.0;
+        s.step();
+        assert!((s.laser - 1.0).abs() < 1e-6);
+        for _ in 0..10 {
+            s.step();
+        }
+        assert_eq!(s.laser, 4.0);
+        let batch = Batch { fired: vec![s.clone()], gone: vec![] };
+        let back = Batch::decode(&batch.encode(30_000)[0]);
+        assert_eq!((back.fired[0].laser, back.fired[0].laser_max), (4.0, 4.0));
+    }
+
+    #[test]
+    fn a_held_shot_waits_out_its_hold_then_goes_on() {
+        let mut s = plain(0.5, 0.5, 0.0, shot(form::SMALL, 0, 0, 80, 0));
+        s.step();
+        let (at, ticks) = (s.pos, s.ticks);
+        s.hold = 3;
+        for _ in 0..3 {
+            assert!(s.step());
+        }
+        assert_eq!((s.pos, s.ticks), (at, ticks));
+        s.step();
+        assert!(s.pos != at);
+    }
+
+    #[test]
+    fn a_bug_storm_shot_goes_through_its_three_stages() {
+        let mut s = plain(1.0, 0.0, -0.05, shot_full(form::TINY, 7, SIZE[1], 2.0, 0, 50, special::BUG_STORM));
+        for _ in 0..50 {
+            s.step();
+        }
+        assert_eq!((s.special, s.end, s.ticks), (special::BUG_STORM + 1, 20, 0));
+        for _ in 0..20 {
+            s.step();
+        }
+        assert_eq!((s.special, s.form), (special::BUG_STORM + 2, form::LIGHT));
+        for _ in 0..20 {
+            s.step();
+        }
+        assert_eq!((s.special, s.form, s.end), (0, form::RICE, 80));
+        assert!(s.angle.length().is_finite());
+    }
+
+    #[test]
+    fn icicles_turn_square_and_fall_at_their_end() {
+        let mut s = plain(1.0, 0.0, -0.1, shot_full(form::CRYSTAL, 1, 0.5, 6.0, 0, 5, special::ICICLE_LEFT));
+        for _ in 0..5 {
+            s.step();
+        }
+        assert_eq!(s.special, 0);
+        assert_eq!(s.end, 120);
+        assert!(s.gravity.y < 0.0);
     }
 
     #[test]

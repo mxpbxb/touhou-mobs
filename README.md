@@ -43,6 +43,42 @@ rate of fire. Its model is its Java model, converted part for part. Hostile mobs
 go for the Touhou mobs that are attacking, and a Touhou mob a vanilla mob hurts fights it back, its
 danmaku aimed at that mob until it is dead or 40 blocks off.
 
+## Classic bosses
+
+Eleven named characters also come as a **Classic** version, beside the ones above, which are
+untouched. A classic boss fights as the original mod had it: at the original's full rate of fire,
+through every stage, and with every spell card it declared, lasers included. A classic boss has no
+spawning of its own: once in 20,000 one comes in place of its counterpart, and each has its own
+spawn egg.
+
+- **Reimu Hakurei (Classic)**: Spirit Sign "Fantasy Seal" (homing orbs that grow).
+- **Reimu Hakurei (Journey To Gensokyo, Classic)**: her amulets and yin-yang orbs, then Fantasy Seal.
+- **Marisa Kirisame (Classic)**: three stages with star familiars; Stardust Reverie, Non-Directional
+  Laser and Master Spark; then her final word, Loving Heart "Double Spark".
+- **Yukari Yakumo (Classic)**: five kunai stages; Flying-glowworm Nest (gaps that fire lasers), Curse
+  of Dreams and Reality, Double Black Death Butterfly, Mesh of Light and Darkness, and Boundary
+  between Wave and Particle.
+- **Yukari Great Doll**: classic Yukari with a quarter of her health, whose danmaku does half
+  its damage. When you come out of a gap made global with a Yukari umbrella (Yukari Gaps), the
+  Yukari who sometimes follows is always her, and she always drops an umbrella. Yukari drops one
+  70 times in 100.
+- **Cirno (Classic)**: her second stage's fans of lasers; Icicle Fall and Perfect Freeze.
+- **Rumia (Classic)**: Moonlight Ray (seven turning lasers).
+- **Soga no Tojiko (Classic)**: Gagouji's Cyclone (zigzagging arrows).
+- **Wriggle Nightbug (Classic)**: Meteor on Earth (familiars shedding lights), then Little Bug Storm.
+- **Sakuya Izayoi (Classic)**: Killing Doll. Time stops for three seconds: every danmaku shot within
+  40 blocks hangs in the air, and a quarter of her knives are thrown again.
+- **Sanae Kochiya (Classic)**: her drawn star, then Miracle Fruit, Moses's Miracle, Yasaka's Divine
+  Wind and Bewitching Power Spoiler (scales that come back to her; one that touches you withers and
+  starves you; if she catches it again she gains regeneration and strength).
+- **Toyosatomimi no Miko (Classic)**: Fantasy Seal.
+
+A classic boss has all its stages in one health bar, as the Wither has its phases: its health
+times its number of stages. Each time it loses one stage's worth, it goes on to the next stage,
+and one blow can break only one stage. While a classic boss is near, a boss bar shows all of its
+health and the spell card it is casting. A broken stage ends in a blast, and the last one ends in
+a great explosion. Like the originals, Reimu, Marisa, Sakuya, Sanae and Miko don't fight until you hit them.
+
 ## Drops
 
 With [Touhou Items](https://github.com/mxpbxb/touhou-items) installed, the mobs scatter its Point
@@ -71,8 +107,11 @@ player comes through a Yukari gap ([Yukari Gaps](https://github.com/mxpbxb/yukar
 
 ## Not yet
 
-- Most bosses' spell cards: nine of the originals' cards are ported; the rest come in turn.
-- Lasers, and the shapes of the star, butterfly, rice and crystal bullets (they are drawn as glows).
+- The other bosses' spell cards: SPELLCARD PLUS's (Wakasagihime, Hina, its Cirno and Rumia) are
+  not ported, and the bosses above still fight with the nine cards ported before.
+- The shapes of the star, butterfly, rice and crystal bullets for the bosses above (the classic
+  bosses' are drawn in their shapes; the originals' 3D shot models are not).
+- In Killing Doll's stopped time, players and mobs go on moving; only the danmaku stops.
 - Sakuya's and Sanae's trades, and most of Rinnosuke's, which are for Touhou Items Mod's items.
 
 ## Building
