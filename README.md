@@ -58,8 +58,8 @@ spawn egg.
 - **Yukari Yakumo (Classic)**: five kunai stages; Flying-glowworm Nest (gaps that fire lasers), Curse
   of Dreams and Reality, Double Black Death Butterfly, Mesh of Light and Darkness, and Boundary
   between Wave and Particle.
-- **Yukari Great Doll**: classic Yukari with a quarter of her health, whose danmaku does half
-  its damage. When you come out of a gap made global with a Yukari umbrella (Yukari Gaps), the
+- **Yukari Great Doll**: classic Yukari at half her size, with a quarter of her health, whose
+  danmaku flies at half its speed and does half its damage. When you come out of a gap made global with a Yukari umbrella (Yukari Gaps), the
   Yukari who sometimes follows is always her, and she always drops an umbrella. Yukari drops one
   70 times in 100.
 - **Cirno (Classic)**: her second stage's fans of lasers; Icicle Fall and Perfect Freeze.
@@ -81,7 +81,12 @@ a great explosion. Like the originals, Reimu, Marisa, Sakuya, Sanae and Miko don
 
 ## Drops
 
-With [Touhou Items](https://github.com/mxpbxb/touhou-items) installed, the mobs scatter its Point
+The fairies and crow tengu (fairies, sunflower, ice, Nether and moon fairies, crow tengu, the Old
+Crow Tengu and hell ravens) drop what Arcadian Dream's fairies drop: 1 to 4 of its power and point
+items, and now and then a bomb, an extend, a star or the Fairy Playground disc. They sound as its
+fairies do, with a bat's voice. A boss killed with `/kill` dies for good, with its drops.
+
+With [Touhou Items](https://github.com/mxpbxb/touhou-items) installed, the other mobs scatter its Point
 items when they die for good, a boss many more than a fairy, and power items: a fairy now and then a
 small one, a boss big ones and sometimes Full Power, an Extend or a Bomb. Alice Dolls Restringed's
 dolls take them as love.

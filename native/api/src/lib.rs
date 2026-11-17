@@ -224,6 +224,9 @@ impl Server {
 
     fn add(&mut self, dimension: &str, mut s: Shot, owner: u32, batch: &mut Batch) {
         s.fancy = s.fancy || self.classic.contains(&owner);
+        if self.halved.contains(&owner) {
+            slow(&mut s);
+        }
         let s = self.give_id(s);
         batch.fired.push(s.clone());
         self.shots.entry(dimension.to_owned()).or_default().push(Live { shot: s, owner });
@@ -473,8 +476,12 @@ impl Server {
                 let full = self.classic.contains(&live.owner);
                 let target = nearest(live.shot.pos);
                 let burst = if live.shot.hold > 0 { Vec::new() } else { bursts(&live.shot, owner.map(|u| u.look()), target, full, &mut self.rng) };
+                let doll = self.halved.contains(&live.owner);
                 for mut child in burst {
                     child.fancy = live.shot.fancy;
+                    if doll {
+                        slow(&mut child);
+                    }
                     let child = self.give_id(child);
                     batch.fired.push(child.clone());
                     fresh.push(Live { shot: child, owner: live.owner });
@@ -922,6 +929,16 @@ fn fantasy_seal(s: &mut Shot, aim: Option<(V3, V3)>) {
             s.restart(0.3);
         }
     }
+}
+
+/// How fast the Great Doll's danmaku goes, of classic Yukari's.
+const DOLL_SPEED: f64 = 0.5;
+
+/// A shot of the Great Doll's: half as fast, speeding up half as much, to half the top speed.
+fn slow(s: &mut Shot) {
+    s.motion = s.motion * DOLL_SPEED;
+    s.accel *= DOLL_SPEED;
+    s.limit *= DOLL_SPEED;
 }
 
 /// Whether a gap made global with a Yukari umbrella is by `to`: Yukari Gaps keeps its gaps in
@@ -1379,6 +1396,20 @@ fn pose(root: &mut ModelPart, model: &str, mob: &NativeMobRender<'_>) {
 /// The Yukari umbrella (Yukari Gaps): Yukari drops it 70 times in 100, the Great Doll every time.
 const UMBRELLA: &str = "yukari_gap:yukari_umbrella";
 
+/// The fairies and crows, which drop what Arcadian Dream's fairies do (and sound as they do:
+/// `fairy_voice.rs`).
+const FAIRIES: [&str; 9] = [
+    "thmobs:fairy",
+    "thmobs:sunflower_fairy",
+    "thmobs:ice_fairy",
+    "thmobs:nether_fairy",
+    "thmobs:moon_fairy",
+    "thmobs:moon_sunflower_fairy",
+    "thmobs:crow_tengu",
+    "thmobs:old_crow_tengu",
+    "thmobs:hell_raven",
+];
+
 /// The chance, in percent, that the mob `kind` drops a Yukari umbrella when beaten.
 fn umbrella_chance(kind: &str) -> u32 {
     match kind {
@@ -1397,7 +1428,23 @@ fn drop_points(host: &mut dyn Host, id: u32, boss: bool, kind: &str) {
     // Power: a fairy now and then drops a small one; a boss always drops big ones, and sometimes
     // full power or an extra life.
     let mut drops = vec![("thkaguyamod:point_item", points)];
-    if boss {
+    if FAIRIES.contains(&kind) {
+        // Arcadian Dream's fairy loot table: 1 to 4 power and point items; a bomb and an extend
+        // 10 times in 100 each, a star 15, the Fairy Playground disc 1.
+        drops = vec![("arcadiandream:power_item", 1 + roll(4)), ("arcadiandream:point_item", 1 + roll(4))];
+        if roll(10) == 0 {
+            drops.push(("arcadiandream:bomb_item", 1));
+        }
+        if roll(10) == 0 {
+            drops.push(("arcadiandream:extend_item", 1));
+        }
+        if roll(20) < 3 {
+            drops.push(("arcadiandream:star_item", 1));
+        }
+        if roll(100) == 0 {
+            drops.push(("arcadiandream:music_disc_fairy_playground", 1));
+        }
+    } else if boss {
         drops.push(("thkaguyamod:big_power_item", 2 + roll(3)));
         drops.push(("thkaguyamod:small_power_item", 4 + roll(5)));
         if roll(4) == 0 {
@@ -1469,7 +1516,9 @@ impl Hooks for Mod {
     fn living_death(&self, host: &mut dyn Host, event: &mut LivingDeathEvent<'_>) -> Flow {
         let Some(spec) = mobs::by_kind(event.kind) else { return Flow::Continue };
         let phase = ai::phase_of(event.entity, spec);
-        let next = spec.phases.iter().find(|p| p.from == phase).filter(|p| p.hp > 0.0);
+        // `/kill` and the void end it for good, drops and all, whatever phase it is in.
+        let killed = matches!(event.damage_type, "minecraft:generic_kill" | "minecraft:out_of_world");
+        let next = spec.phases.iter().find(|p| p.from == phase).filter(|p| p.hp > 0.0 && !killed);
         let classic = is_classic(event.kind);
         if classic {
             explode(host, event.entity, next.is_none());
@@ -1666,9 +1715,11 @@ impl Hooks for Mod {
                 root.reset_all_poses();
                 pose(root, model, event.mob);
                 let texture = mobs::texture_of(spec, event.mob.id);
+                // The Great Doll is half her size.
+                let size = if spec.id == "yukari_great_doll" { 0.5 } else { 1.0 };
                 let draw = &mut *event.draw;
                 draw.push();
-                draw.scale([1.0, -1.0, -1.0]);
+                draw.scale([size, -size, -size]);
                 draw.translate([0.0, -1.501, 0.0]);
                 host.draw_model_part(draw, root, &format!("thmobs:entity/{texture}"), 0xFF_FF_FF);
                 draw.pop();
@@ -1726,6 +1777,13 @@ mod tests {
         assert_eq!(umbrella_chance(GREAT_DOLL), 100);
         assert_eq!(umbrella_chance("thmobs:yukari"), 70);
         assert_eq!(umbrella_chance("thmobs:reimu"), 0);
+        for f in FAIRIES {
+            assert!(mobs::by_kind(f).is_some(), "{f}");
+        }
+        let voice = include_str!("../../fairy_voice.rs");
+        for f in FAIRIES {
+            assert!(voice.contains(&format!("\"{f}\"")), "{f}");
+        }
     }
 
     #[test]
