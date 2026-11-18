@@ -113,7 +113,46 @@ const CLASSIC_IN: u32 = 20_000;
 
 /// Bosses gone on to their next phase, and the health to start it with, still to be given them:
 /// the game sets a mob whose death was canceled to 1 health after `living_death`.
-static REFILL: Mutex<Vec<(u32, f32)>> = Mutex::new(Vec::new());
+static REFILL: Mutex<Vec<(u32, f32, u64)>> = Mutex::new(Vec::new());
+
+/// Level ticks so far (each dimension's), the clock for `HITS`.
+static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The tick each of our mobs last took real damage. Horizon's `/kill` sets health to 0 with no blow
+/// (and its death hook names the last real one), so a death with no damage just before it is a
+/// kill command, or another mod's, and ends the mob for good.
+static HITS: LazyLock<Mutex<HashMap<u32, u64>>> = LazyLock::new(Default::default);
+
+/// How many level ticks after a blow a death may still be that blow's: the death is settled in the
+/// tick it lands or the next, and with three dimensions ticking that is up to six level ticks.
+const BLOW_TICKS: u64 = 8;
+
+fn now() -> u64 {
+    TICKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether a death ends the mob for good rather than starting its next phase: the kill command, the
+/// void, or no blow just before it.
+fn ends_for_good(damage_type: &str, last_hit: Option<u64>, now: u64) -> bool {
+    matches!(damage_type, "minecraft:generic_kill" | "minecraft:out_of_world")
+        || last_hit.is_none_or(|hit| now.saturating_sub(hit) > BLOW_TICKS)
+}
+
+/// Everything kept about mob `id`: it is gone, or its id is someone else's now.
+fn forget(id: u32) {
+    if let Ok(mut b) = ai::BOSSES.lock() {
+        b.remove(&id);
+    }
+    if let Ok(mut s) = ai::STATUS.lock() {
+        s.remove(&id);
+    }
+    if let Ok(mut h) = HITS.lock() {
+        h.remove(&id);
+    }
+    if let Ok(mut r) = REFILL.lock() {
+        r.retain(|e| e.0 != id);
+    }
+}
 
 static SERVER: LazyLock<Mutex<Server>> = LazyLock::new(|| {
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
@@ -1492,6 +1531,9 @@ impl Hooks for Mod {
         }
         let Some(spec) = mobs::by_kind(&event.mob.kind.id) else { return };
         let id = event.mob.id;
+        // A new mob: nothing a mob that had its id before left behind (a boss's phase, its time
+        // unhurt) is its.
+        forget(id);
         let ai = &mut event.mob.ai;
         ai.goals.clear();
         ai.targets.clear();
@@ -1518,7 +1560,8 @@ impl Hooks for Mod {
         let Some(spec) = mobs::by_kind(kind) else { return Flow::Continue };
         let phase = ai::phase_of(event.entity, spec);
         // `/kill` and the void end it for good, drops and all, whatever phase it is in.
-        let killed = matches!(event.damage_type, "minecraft:generic_kill" | "minecraft:out_of_world");
+        let last_hit = HITS.lock().ok().and_then(|h| h.get(&event.entity).copied());
+        let killed = ends_for_good(event.damage_type, last_hit, now());
         let next = spec.phases.iter().find(|p| p.from == phase).filter(|p| p.hp > 0.0 && !killed);
         let classic = is_classic(kind);
         if classic {
@@ -1527,24 +1570,36 @@ impl Hooks for Mod {
         let Some(next) = next else {
             // Gone for good: it scatters Point items, a boss many more than a fairy.
             drop_points(host, event.entity, !spec.phases.is_empty(), kind);
-            if let Ok(mut s) = ai::STATUS.lock() {
-                s.remove(&event.entity);
-            }
+            forget(event.entity);
             return Flow::Continue;
         };
         begin_phase(event.entity, next);
+        if let Ok(mut h) = HITS.lock() {
+            h.remove(&event.entity);
+        }
         // The game leaves a mob whose death was canceled at 1 health once this returns: the next
         // phase's health goes on at the next tick (`level_tick_post`).
         let hp = if classic { spec.top_of(spec.card_of(next.to)) } else { next.hp };
         if let Ok(mut r) = REFILL.lock() {
-            r.push((event.entity, hp));
+            r.retain(|e| e.0 != event.entity);
+            r.push((event.entity, hp, now()));
         }
         Flow::Cancel
     }
 
-    /// A boss can't be hurt in a new phase's first moments.
+    /// A boss can't be hurt in a new phase's first moments. Each blow that lands is noted, for the
+    /// death hook to tell a blow's death from a kill command's.
     fn living_incoming_damage(&self, event: &mut LivingIncomingDamageEvent<'_>) -> Flow {
-        if is_ours(mobs::bare(event.kind)) && ai::invincible(event.entity as u32) { Flow::Cancel } else { Flow::Continue }
+        if !is_ours(mobs::bare(event.kind)) {
+            return Flow::Continue;
+        }
+        if ai::invincible(event.entity as u32) {
+            return Flow::Cancel;
+        }
+        if let Ok(mut h) = HITS.lock() {
+            h.insert(event.entity as u32, now());
+        }
+        Flow::Continue
     }
 
     /// A right click: Rinnosuke trades; Miko sets the danmaku level, from easy to lunatic and round
@@ -1636,8 +1691,12 @@ impl Hooks for Mod {
     }
 
     fn level_tick_post(&self, host: &mut dyn Host, event: &mut LevelTickPostEvent<'_>) {
+        TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A refill that finds no living mob in any dimension within a few ticks is dropped: its
+        // mob is gone, and the id may come to another.
         if let Ok(mut r) = REFILL.lock() {
-            r.retain(|&(id, hp)| !host.set_mob_health(event.dimension, id, hp));
+            let t = now();
+            r.retain(|&(id, hp, at)| !host.set_mob_health(event.dimension, id, hp) && t.saturating_sub(at) <= BLOW_TICKS);
         }
         classic_cards(host, event.dimension);
         let batch = match SERVER.lock() {
@@ -1856,6 +1915,32 @@ mod tests {
             }
             assert!(most < 8000, "{card:?}: {most} shots at once");
         }
+    }
+
+    /// A blow just before a death ends a phase; `/kill`, which deals none (and whose death names the
+    /// last real blow), the void, and a death long after any blow end the mob.
+    #[test]
+    fn only_a_blow_just_before_a_death_ends_a_phase() {
+        assert!(!ends_for_good("minecraft:player_attack", Some(100), 100));
+        assert!(!ends_for_good("minecraft:player_attack", Some(100), 100 + BLOW_TICKS));
+        assert!(ends_for_good("minecraft:player_attack", Some(100), 101 + BLOW_TICKS));
+        assert!(ends_for_good("minecraft:player_attack", None, 100));
+        assert!(ends_for_good("minecraft:generic_kill", Some(100), 100));
+        assert!(ends_for_good("minecraft:out_of_world", Some(100), 100));
+    }
+
+    /// A mob gone (or a new one with its id) leaves no phase, time unhurt or refill behind.
+    #[test]
+    fn a_forgotten_id_is_no_boss_and_not_invincible() {
+        let id = 987_654;
+        ai::BOSSES.lock().unwrap().insert(id, ai::Boss { phase: 3, counter: None, invincible: 160, ai: None });
+        HITS.lock().unwrap().insert(id, 5);
+        REFILL.lock().unwrap().push((id, 100.0, 5));
+        assert!(ai::invincible(id));
+        forget(id);
+        assert!(!ai::invincible(id));
+        assert!(!HITS.lock().unwrap().contains_key(&id));
+        assert!(REFILL.lock().unwrap().iter().all(|e| e.0 != id));
     }
 
     #[test]
