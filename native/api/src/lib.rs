@@ -1476,9 +1476,9 @@ fn drop_points(host: &mut dyn Host, id: u32, boss: bool, kind: &str) {
     let points = if boss { 10 + roll(11) } else { 1 + roll(3) };
     // Power: a fairy now and then drops a small one; a boss always drops big ones, and sometimes
     // full power or an extra life.
-    // Doll Points drop one time in 10.
+    // Doll Points drop one time in 25.
     let mut drops = Vec::new();
-    if roll(10) == 0 {
+    if roll(25) == 0 {
         drops.push(("thkaguyamod:point_item", points));
     }
     if FAIRIES.contains(&kind) {

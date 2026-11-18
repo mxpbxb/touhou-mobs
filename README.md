@@ -87,7 +87,7 @@ items, and now and then a bomb, an extend, a star or the Fairy Playground disc. 
 fairies do, with a bat's voice. A boss killed with `/kill` dies for good, with its drops.
 
 With [Touhou Items](https://github.com/mxpbxb/touhou-items) installed, the other mobs drop its Point
-items (Doll Points) one time in 10 when they die for good, a boss many more than a fairy, and power items: a fairy now and then a
+items (Doll Points) one time in 25 when they die for good, a boss many more than a fairy, and power items: a fairy now and then a
 small one, a boss big ones and sometimes Full Power, an Extend or a Bomb. Alice Dolls Restringed's
 dolls take them as love.
 
