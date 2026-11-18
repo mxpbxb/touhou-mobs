@@ -138,6 +138,15 @@ fn ends_for_good(damage_type: &str, last_hit: Option<u64>, now: u64) -> bool {
         || last_hit.is_none_or(|hit| now.saturating_sub(hit) > BLOW_TICKS)
 }
 
+/// The phase a boss felled in `phase` comes back in, if any. Only the classic bosses come back:
+/// every other boss has one life, with the health of its strongest phase (`Mob::max_health`).
+fn next_life(spec: &mobs::Mob, phase: i32, killed: bool) -> Option<&mobs::Phase> {
+    if killed || !spec.classic() {
+        return None;
+    }
+    spec.phases.iter().find(|p| p.from == phase).filter(|p| p.hp > 0.0)
+}
+
 /// Everything kept about mob `id`: it is gone, or its id is someone else's now.
 fn forget(id: u32) {
     if let Ok(mut b) = ai::BOSSES.lock() {
@@ -1080,8 +1089,9 @@ fn offer(buy: &str, count: i32, sell: &str) -> Tag {
 }
 
 fn summon(host: &mut dyn Host, dimension: &str, mob: &mobs::Mob, at: [f64; 3]) -> Option<u32> {
-    // A classic boss comes with all its cards' health.
-    let health = if mob.classic() { mob.max_health() } else { mob.health };
+    // A classic boss comes with all its cards' health; any other boss, with one life, with the
+    // health of its strongest phase.
+    let health = mob.max_health();
     let mut nbt: Compound = [("Silent".into(), Tag::Byte(1)), ("Health".into(), Tag::Float(health.to_bits()))].into();
     if mob.id == "rinnosuke" {
         // The one trade of his made of vanilla things; the rest are Touhou Items Mod's items, to come.
@@ -1562,7 +1572,7 @@ impl Hooks for Mod {
         // `/kill` and the void end it for good, drops and all, whatever phase it is in.
         let last_hit = HITS.lock().ok().and_then(|h| h.get(&event.entity).copied());
         let killed = ends_for_good(event.damage_type, last_hit, now());
-        let next = spec.phases.iter().find(|p| p.from == phase).filter(|p| p.hp > 0.0 && !killed);
+        let next = next_life(spec, phase, killed);
         let classic = is_classic(kind);
         if classic {
             explode(host, event.entity, next.is_none());
@@ -1927,6 +1937,24 @@ mod tests {
         assert!(ends_for_good("minecraft:player_attack", None, 100));
         assert!(ends_for_good("minecraft:generic_kill", Some(100), 100));
         assert!(ends_for_good("minecraft:out_of_world", Some(100), 100));
+    }
+
+    /// The basic bosses die on their first death, with their strongest phase's health (Yukari
+    /// 300); the classic ones go on through their cards.
+    #[test]
+    fn only_classic_bosses_come_back() {
+        for m in mobs::MOBS.iter().filter(|m| !m.phases.is_empty()) {
+            let first = mobs::start_of(m, 1);
+            if m.classic() {
+                assert!(next_life(m, first, false).is_some(), "{}", m.id);
+                assert!(next_life(m, first, true).is_none(), "{}", m.id);
+            } else {
+                assert!(next_life(m, first, false).is_none(), "{}", m.id);
+                assert!(m.max_health() >= m.health, "{}", m.id);
+            }
+        }
+        let yukari = mobs::MOBS.iter().find(|m| m.id == "yukari").unwrap();
+        assert_eq!(yukari.max_health(), 300.0);
     }
 
     /// A mob gone (or a new one with its id) leaves no phase, time unhurt or refill behind.
