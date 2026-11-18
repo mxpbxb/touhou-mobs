@@ -1476,7 +1476,11 @@ fn drop_points(host: &mut dyn Host, id: u32, boss: bool, kind: &str) {
     let points = if boss { 10 + roll(11) } else { 1 + roll(3) };
     // Power: a fairy now and then drops a small one; a boss always drops big ones, and sometimes
     // full power or an extra life.
-    let mut drops = vec![("thkaguyamod:point_item", points)];
+    // Doll Points drop one time in 10.
+    let mut drops = Vec::new();
+    if roll(10) == 0 {
+        drops.push(("thkaguyamod:point_item", points));
+    }
     if FAIRIES.contains(&kind) {
         // Arcadian Dream's fairy loot table: 1 to 4 power and point items; a bomb and an extend
         // 10 times in 100 each, a star 15, the Fairy Playground disc 1.
