@@ -14,7 +14,7 @@ theirs; this repository holds the Horizon port's code and the tools that build i
 
 Install both from the release, then press Build in the launcher:
 
-- **`thmobs_native`** (`.hnmod`): the code. A native mod: it runs with your account's permissions,
+- **`thmobs_native`** (`.hmod`, a native SDK mod): the code. A native mod: it runs with your account's permissions,
   so the launcher asks before building it.
 - **`thmobs`** (`.hmod`): the mobs' types, textures, spawn eggs and the danmaku sheets.
 
@@ -59,7 +59,7 @@ spawn egg.
   of Dreams and Reality, Double Black Death Butterfly, Mesh of Light and Darkness, and Boundary
   between Wave and Particle.
 - **Yukari Great Doll**: classic Yukari at half her size, with a quarter of her health, whose
-  danmaku flies at half its speed and does half its damage. When you come out of a gap made global with a Yukari umbrella (Yukari Gaps), the
+  danmaku flies at half its speed and does half its damage. When you come out of a Giga Gap (a gap made global with a Yukari umbrella, Yukari Gaps), the
   Yukari who sometimes follows is always her, and she always drops an umbrella. Yukari drops one
   70 times in 100.
 - **Cirno (Classic)**: her second stage's fans of lasers; Icicle Fall and Perfect Freeze.
@@ -108,7 +108,8 @@ A saved change takes hold in game within ten seconds.
 The named characters (the bosses, and the people) are rare: one comes at most every five minutes,
 about once or twice a night, alone and never while another of the same one is about. And whenever a
 player comes through a Yukari gap ([Yukari Gaps](https://github.com/mxpbxb/yukari-gaps)), once in
-2,000 Yukari comes through after them.
+2,000 Yukari steps out of the gap they came out of, right behind them (out of a Giga Gap, Yukari
+Great Doll).
 
 ## Not yet
 
@@ -128,4 +129,6 @@ From the decompiled originals and their jars (not in this repository):
   jars' art. `spawns.py` writes `SPAWNS.md`.
 - `preview.py` draws a converted model from the front, to check it without the game.
 
-The native mod is built by the Horizon launcher (`native-build`), pinned to one Horizon revision.
+The native mod is `native-sdk/`, a Horizon SDK project (`cargo horizon-mod build` in it packs
+`thmobs_native.hmod`; its `.horizon/sdk` is not in the repository), pinned to one Horizon revision
+and built by the launcher (`native-build`). `native/` is the older mixin crate it was migrated from.
